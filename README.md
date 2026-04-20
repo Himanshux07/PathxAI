@@ -1,4 +1,4 @@
-# PathxAI - Medical Voice Assistant
+# PartexAI - Medical Voice Assistant
 
 A comprehensive full-stack application for voice-driven clinical data extraction in Indian hospitals, supporting multilingual conversations (English, Hindi, Marathi).
 
