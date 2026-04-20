@@ -1,3 +1,4 @@
+import FormData from 'form-data'
 import { uploadAudioBufferToCloudinary } from './storage.service.js'
 
 const EMPTY_STRUCTURED_DATA = {
@@ -260,26 +261,29 @@ const transcribeWithOpenAI = async (file) => {
     throw new Error('Audio file buffer is empty.')
   }
 
-  const formData = new FormData()
-  const audioBlob = new Blob([file.buffer], { type: file.mimetype || 'audio/webm' })
-  formData.append('file', audioBlob, file.originalname || 'audio.webm')
-  formData.append('model', process.env.TRANSCRIPTION_MODEL || 'gpt-4o-mini-transcribe')
-  formData.append(
+  const form = new FormData()
+  form.append('file', file.buffer, {
+    filename: file.originalname || 'audio.webm',
+    contentType: file.mimetype || 'audio/webm',
+  })
+  form.append('model', process.env.TRANSCRIPTION_MODEL || 'whisper-1')
+  form.append(
     'prompt',
     process.env.TRANSCRIPTION_PROMPT ||
       'This is a medical consultation between a patient and a doctor in Hindi/Hinglish/English. Preserve full meaning and output clean conversational text with speaker labels like "Patient:" and "Doctor:" when possible.',
   )
 
   if (process.env.TRANSCRIPTION_LANGUAGE) {
-    formData.append('language', process.env.TRANSCRIPTION_LANGUAGE)
+    form.append('language', process.env.TRANSCRIPTION_LANGUAGE)
   }
 
   const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${process.env.TRANSCRIPTION_API_KEY}`,
+      ...form.getHeaders(),
     },
-    body: formData,
+    body: form,
   })
 
   if (!response.ok) {
@@ -317,39 +321,7 @@ const callGroqGenerateContent = async ({ apiKey, model, messages }) => {
   return modelText
 }
 
-const transcribeWithGroq = async (file) => {
-  if (!file?.buffer?.length) {
-    throw new Error('Audio file buffer is empty.')
-  }
 
-  const groqApiKey = process.env.GROQ_API_KEY || process.env.TRANSCRIPTION_API_KEY
-  if (!groqApiKey) {
-    throw new Error('GROQ_API_KEY is not configured.')
-  }
-
-  const base64Audio = file.buffer.toString('base64')
-  const mimeType = file.mimetype || 'audio/webm'
-
-  const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${groqApiKey}`,
-    },
-    body: new URLSearchParams({
-      model: process.env.GROQ_TRANSCRIPTION_MODEL || process.env.TRANSCRIPTION_MODEL || 'whisper-large-v3',
-      file: base64Audio,
-      language: process.env.TRANSCRIPTION_LANGUAGE || 'auto',
-    }).toString(),
-  })
-
-  if (!response.ok) {
-    const errorPayload = await response.text().catch(() => '')
-    throw new Error(`Groq transcription error: ${response.status} ${errorPayload}`)
-  }
-
-  const payload = await response.json()
-  return payload.text || ''
-}
 
 const extractStructuredDataWithAI = async (transcription) => {
   const text = typeof transcription === 'string' ? transcription.trim() : ''
@@ -390,20 +362,12 @@ const extractStructuredDataWithAI = async (transcription) => {
 }
 
 const getTranscriptionText = async ({ file }) => {
-  const provider = normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'groq')
-
-  if (provider === 'groq') {
-    const groqApiKey = process.env.GROQ_API_KEY || process.env.TRANSCRIPTION_API_KEY
-    if (groqApiKey) {
-      return transcribeWithGroq(file)
-    }
-  }
-
-  if (provider === 'openai' && process.env.TRANSCRIPTION_API_KEY) {
+  // Speech-to-text transcription uses OpenAI Whisper
+  if (process.env.TRANSCRIPTION_API_KEY) {
     return transcribeWithOpenAI(file)
   }
 
-  const error = new Error('Transcription provider is not configured. Set GROQ_API_KEY (recommended) and TRANSCRIPTION_PROVIDER=groq.')
+  const error = new Error('Transcription provider is not configured. Set TRANSCRIPTION_API_KEY (OpenAI Whisper for speech-to-text).')
   error.statusCode = 503
   throw error
 }
@@ -440,9 +404,9 @@ export const processClinicalUpload = async ({ file, patientId }) => {
   })
   const durationMs = Date.now() - startedAt
 
-  const hasAnyTranscriptionKey = !!(process.env.GROQ_API_KEY || process.env.TRANSCRIPTION_API_KEY)
-  const transcriptionProvider = hasAnyTranscriptionKey ? normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'groq') : 'none'
-  const aiProvider = aiStructuredData ? normalizeText(process.env.AI_PROVIDER || 'groq') : 'rule_based'
+  const hasTranscriptionKey = !!process.env.TRANSCRIPTION_API_KEY
+  const transcriptionProvider = hasTranscriptionKey ? 'openai_whisper' : 'none'
+  const aiProvider = aiStructuredData ? 'groq' : 'rule_based'
 
   return {
     transcription,
