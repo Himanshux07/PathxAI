@@ -22,6 +22,36 @@ const loadJson = (value) => {
   }
 }
 
+const formatDateTime = (value) => {
+  if (!value) {
+    return 'Unknown time'
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return 'Unknown time'
+  }
+
+  return new Intl.DateTimeFormat('en-IN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date)
+}
+
+const getPrescriptionTitle = (record) => {
+  const diagnosis = record?.structuredData?.diagnosis
+  if (diagnosis) {
+    return diagnosis
+  }
+
+  const symptoms = record?.structuredData?.symptoms
+  if (Array.isArray(symptoms) && symptoms.length > 0) {
+    return symptoms.slice(0, 2).join(', ')
+  }
+
+  return record?.type === 'audio_upload' ? 'Audio consultation' : 'Clinical note'
+}
+
 function App() {
   const [theme, setTheme] = useState(() => {
     const savedTheme = localStorage.getItem('pathx-theme')
@@ -45,6 +75,8 @@ function App() {
   const [errorMessage, setErrorMessage] = useState('')
   const [recordingSeconds, setRecordingSeconds] = useState(0)
   const [uploadedFileName, setUploadedFileName] = useState('')
+  const [previousRecords, setPreviousRecords] = useState([])
+  const [isLoadingRecords, setIsLoadingRecords] = useState(false)
 
   const mediaRecorderRef = useRef(null)
   const mediaStreamRef = useRef(null)
@@ -79,6 +111,36 @@ function App() {
   }, [currentUser])
 
   useEffect(() => {
+    const loadPreviousRecords = async () => {
+      if (!authToken || !currentUser) {
+        setPreviousRecords([])
+        return
+      }
+
+      setIsLoadingRecords(true)
+
+      try {
+        const response = await apiFetch('/clinical/records')
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null)
+          throw new Error(payload?.message || 'Failed to load previous records.')
+        }
+
+        const payload = await response.json()
+        setPreviousRecords(Array.isArray(payload.records) ? payload.records : [])
+      } catch (error) {
+        setPreviousRecords([])
+        setErrorMessage(error.message || 'Unable to load previous records.')
+      } finally {
+        setIsLoadingRecords(false)
+      }
+    }
+
+    loadPreviousRecords()
+  }, [authToken, currentUser])
+
+  useEffect(() => {
     return () => {
       if (mediaRecorderRef.current?.state === 'recording') {
         mediaRecorderRef.current.stop()
@@ -109,6 +171,7 @@ function App() {
     setAuthError('')
     setRecordingSeconds(0)
     setUploadedFileName('')
+    setPreviousRecords([])
 
     if (timerRef.current) {
       clearInterval(timerRef.current)
@@ -182,6 +245,7 @@ function App() {
       setErrorMessage('')
       setTranscription('')
       setStructuredData(EMPTY_STRUCTURED_DATA)
+      setPreviousRecords([])
     } catch (error) {
       setAuthError(error.message || 'Unable to login right now.')
     } finally {
@@ -362,6 +426,11 @@ function App() {
       }
 
       setSaveStatus('Saved successfully.')
+      const refreshResponse = await apiFetch('/clinical/records')
+      if (refreshResponse.ok) {
+        const refreshPayload = await refreshResponse.json()
+        setPreviousRecords(Array.isArray(refreshPayload.records) ? refreshPayload.records : [])
+      }
     } catch (error) {
       setSaveStatus('Save failed.')
       setErrorMessage(error.message || 'Unable to save data to database right now.')
@@ -609,6 +678,65 @@ function App() {
                 <pre className="mt-2 overflow-x-auto rounded-xl bg-slate-900 p-4 text-xs leading-6 text-slate-100 md:text-sm">
                   {JSON.stringify(structuredData, null, 2)}
                 </pre>
+              </div>
+
+              <div className="rounded-[1.6rem] border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-800/50">
+                <div className="flex items-center justify-between gap-3">
+                  <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
+                    Previous Prescriptions
+                  </h2>
+                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+                    {previousRecords.length} record{previousRecords.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+
+                {isLoadingRecords ? (
+                  <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">Loading previous records...</p>
+                ) : previousRecords.length === 0 ? (
+                  <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+                    No previous prescription data found yet.
+                  </p>
+                ) : (
+                  <div className="mt-3 space-y-3">
+                    {previousRecords.map((record) => (
+                      <article
+                        key={record._id || record.id}
+                        className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-900/60"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                              {getPrescriptionTitle(record)}
+                            </h3>
+                            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                              {formatDateTime(record.createdAt)}
+                            </p>
+                          </div>
+                          <span className="rounded-full bg-cyan-100 px-3 py-1 text-xs font-semibold text-cyan-700 dark:bg-cyan-500/20 dark:text-cyan-200">
+                            {record.type || 'clinical_note'}
+                          </span>
+                        </div>
+
+                        <div className="mt-3 grid gap-2 text-sm text-slate-700 dark:text-slate-200">
+                          <p>
+                            <span className="font-semibold">Transcription:</span>{' '}
+                            {record.transcription || 'No transcription available.'}
+                          </p>
+                          <p>
+                            <span className="font-semibold">Symptoms:</span>{' '}
+                            {Array.isArray(record.structuredData?.symptoms) && record.structuredData.symptoms.length > 0
+                              ? record.structuredData.symptoms.join(', ')
+                              : 'Not specified'}
+                          </p>
+                          <p>
+                            <span className="font-semibold">Diagnosis:</span>{' '}
+                            {record.structuredData?.diagnosis || 'Not specified'}
+                          </p>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
               </div>
             </section>
           </main>
