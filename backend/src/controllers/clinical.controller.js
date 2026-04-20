@@ -1,5 +1,9 @@
 import { asyncHandler } from '../middleware/asyncHandler.js'
-import { emptyStructuredData, processClinicalUpload } from '../services/clinical.service.js'
+import {
+  emptyStructuredData,
+  extractStructuredDataFromTranscription,
+  processClinicalUpload,
+} from '../services/clinical.service.js'
 import { listClinicalRecordsByPatientId, saveClinicalRecord } from '../config/db.js'
 
 export const uploadClinicalAudio = asyncHandler(async (req, res) => {
@@ -26,12 +30,16 @@ export const uploadClinicalAudio = asyncHandler(async (req, res) => {
 
 export const saveClinicalData = asyncHandler(async (req, res) => {
   const { transcription = '', structuredData = emptyStructuredData } = req.body || {}
+  const normalizedStructuredData =
+    structuredData && Object.values(structuredData).some((value) => (Array.isArray(value) ? value.length > 0 : value !== ''))
+      ? structuredData
+      : extractStructuredDataFromTranscription(transcription)
 
   const savedRecord = await saveClinicalRecord({
     patientId: req.user.patientId,
     type: 'clinical_note',
     transcription,
-    structuredData,
+    structuredData: normalizedStructuredData,
   })
 
   return res.json({
