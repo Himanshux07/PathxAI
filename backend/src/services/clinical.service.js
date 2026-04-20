@@ -1,4 +1,4 @@
-import FormData from 'form-data'
+import OpenAI from 'openai'
 import { uploadAudioBufferToCloudinary } from './storage.service.js'
 
 const EMPTY_STRUCTURED_DATA = {
@@ -261,38 +261,25 @@ const transcribeWithOpenAI = async (file) => {
     throw new Error('Audio file buffer is empty.')
   }
 
-  const form = new FormData()
-  form.append('file', file.buffer, {
-    filename: file.originalname || 'audio.webm',
-    contentType: file.mimetype || 'audio/webm',
-  })
-  form.append('model', process.env.TRANSCRIPTION_MODEL || 'whisper-1')
-  form.append(
-    'prompt',
-    process.env.TRANSCRIPTION_PROMPT ||
+  const apiKey = process.env.TRANSCRIPTION_API_KEY
+  if (!apiKey) {
+    throw new Error('TRANSCRIPTION_API_KEY is not configured.')
+  }
+
+  const openai = new OpenAI({ apiKey })
+
+  const transcription = await openai.audio.transcriptions.create({
+    file: new File([file.buffer], file.originalname || 'audio.webm', {
+      type: file.mimetype || 'audio/webm',
+    }),
+    model: process.env.TRANSCRIPTION_MODEL || 'whisper-1',
+    prompt:
+      process.env.TRANSCRIPTION_PROMPT ||
       'This is a medical consultation between a patient and a doctor in Hindi/Hinglish/English. Preserve full meaning and output clean conversational text with speaker labels like "Patient:" and "Doctor:" when possible.',
-  )
-
-  if (process.env.TRANSCRIPTION_LANGUAGE) {
-    form.append('language', process.env.TRANSCRIPTION_LANGUAGE)
-  }
-
-  const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.TRANSCRIPTION_API_KEY}`,
-      ...form.getHeaders(),
-    },
-    body: form,
+    language: process.env.TRANSCRIPTION_LANGUAGE || 'auto',
   })
 
-  if (!response.ok) {
-    const errorPayload = await response.text().catch(() => '')
-    throw new Error(`Transcription provider error: ${response.status} ${errorPayload}`)
-  }
-
-  const payload = await response.json()
-  return payload.text || ''
+  return transcription.text || ''
 }
 
 const callGroqGenerateContent = async ({ apiKey, model, messages }) => {
