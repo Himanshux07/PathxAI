@@ -156,75 +156,29 @@ const detectLanguageWithAI = async (transcription) => {
     return ''
   }
 
-  const aiProvider = normalizeText(process.env.AI_PROVIDER || 'gemini')
-
-  if (aiProvider === 'gemini') {
-    const geminiApiKey = process.env.AI_API_KEY || process.env.GEMINI_API_KEY || process.env.TRANSCRIPTION_API_KEY
-    if (!geminiApiKey) {
-      return ''
-    }
-
-    const model = process.env.GEMINI_STRUCTURED_DATA_MODEL || process.env.STRUCTURED_DATA_MODEL || 'gemini-1.5-flash'
-    const responseText = await callGeminiGenerateContent({
-      apiKey: geminiApiKey,
-      model,
-      parts: [
-        {
-          text:
-            'Detect the primary spoken language from this medical transcript. Return JSON only: {"language_detected":"<language name>"}.',
-        },
-        { text },
-      ],
-    }).catch(() => '')
-
-    try {
-      const parsed = JSON.parse(extractJsonCandidate(responseText))
-      return typeof parsed?.language_detected === 'string' ? parsed.language_detected.trim() : ''
-    } catch {
-      return ''
-    }
-  }
-
-  const aiApiKey = process.env.AI_API_KEY || process.env.TRANSCRIPTION_API_KEY
-  if (!aiApiKey) {
+  const groqApiKey = process.env.AI_API_KEY || process.env.GROQ_API_KEY || process.env.TRANSCRIPTION_API_KEY
+  if (!groqApiKey) {
     return ''
   }
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${aiApiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: process.env.STRUCTURED_DATA_MODEL || 'gpt-4o-mini',
-      temperature: 0,
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content: 'Detect the primary spoken language from transcript. Return only JSON: {"language_detected":"<language name>"}.',
-        },
-        {
-          role: 'user',
-          content: text,
-        },
-      ],
-    }),
-  }).catch(() => null)
-
-  if (!response?.ok) {
-    return ''
-  }
-
-  const payload = await response.json().catch(() => null)
-  const content = payload?.choices?.[0]?.message?.content
-  if (!content || typeof content !== 'string') {
-    return ''
-  }
+  const model = process.env.GROQ_STRUCTURED_DATA_MODEL || process.env.STRUCTURED_DATA_MODEL || 'mixtral-8x7b-32768'
+  const responseText = await callGroqGenerateContent({
+    apiKey: groqApiKey,
+    model,
+    messages: [
+      {
+        role: 'system',
+        content: 'Detect the primary spoken language from this medical transcript. Return JSON only: {"language_detected":"<language name>"}.',
+      },
+      {
+        role: 'user',
+        content: text,
+      },
+    ],
+  }).catch(() => '')
 
   try {
-    const parsed = JSON.parse(extractJsonCandidate(content))
+    const parsed = JSON.parse(extractJsonCandidate(responseText))
     return typeof parsed?.language_detected === 'string' ? parsed.language_detected.trim() : ''
   } catch {
     return ''
@@ -337,154 +291,98 @@ const transcribeWithOpenAI = async (file) => {
   return payload.text || ''
 }
 
-const callGeminiGenerateContent = async ({ apiKey, model, parts }) => {
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        generationConfig: {
-          temperature: 0,
-        },
-        contents: [
-          {
-            role: 'user',
-            parts,
-          },
-        ],
-      }),
-    },
-  )
-
-  if (!response.ok) {
-    const errorPayload = await response.text().catch(() => '')
-    throw new Error(`Gemini provider error: ${response.status} ${errorPayload}`)
-  }
-
-  const payload = await response.json()
-  const modelText = (payload?.candidates || [])
-    .flatMap((candidate) => candidate?.content?.parts || [])
-    .map((part) => (typeof part?.text === 'string' ? part.text : ''))
-    .join('\n')
-    .trim()
-
-  return modelText
-}
-
-const transcribeWithGemini = async (file) => {
-  if (!file?.buffer?.length) {
-    throw new Error('Audio file buffer is empty.')
-  }
-
-  const geminiApiKey = process.env.GEMINI_API_KEY || process.env.TRANSCRIPTION_API_KEY
-  if (!geminiApiKey) {
-    throw new Error('GEMINI_API_KEY is not configured.')
-  }
-
-  const model = process.env.GEMINI_TRANSCRIPTION_MODEL || process.env.TRANSCRIPTION_MODEL || 'gemini-1.5-flash'
-  const prompt =
-    process.env.TRANSCRIPTION_PROMPT ||
-    'Transcribe this medical consultation audio. Preserve Hindi/Hinglish wording accurately and keep speaker labels as Patient: and Doctor: where possible. Return plain transcript text only.'
-
-  const transcript = await callGeminiGenerateContent({
-    apiKey: geminiApiKey,
-    model,
-    parts: [
-      { text: prompt },
-      {
-        inline_data: {
-          mime_type: file.mimetype || 'audio/webm',
-          data: file.buffer.toString('base64'),
-        },
-      },
-    ],
-  })
-
-  return transcript || ''
-}
-
-const extractStructuredDataWithAI = async (transcription) => {
-  const text = typeof transcription === 'string' ? transcription.trim() : ''
-  const aiProvider = normalizeText(process.env.AI_PROVIDER || 'gemini')
-  if (!text) {
-    return null
-  }
-
-  if (aiProvider === 'gemini') {
-    const geminiApiKey = process.env.AI_API_KEY || process.env.GEMINI_API_KEY || process.env.TRANSCRIPTION_API_KEY
-    if (!geminiApiKey) {
-      return null
-    }
-
-    const model = process.env.GEMINI_STRUCTURED_DATA_MODEL || process.env.STRUCTURED_DATA_MODEL || 'gemini-1.5-flash'
-    const content = await callGeminiGenerateContent({
-      apiKey: geminiApiKey,
-      model,
-      parts: [
-        {
-          text:
-            'Convert this doctor-patient consultation into valid JSON only with keys: language_detected, symptoms, duration, severity, diagnosis, medications, additional_notes, missing_information. symptoms, medications, missing_information must be arrays.',
-        },
-        {
-          text,
-        },
-      ],
-    }).catch(() => '')
-
-    const candidate = extractJsonCandidate(content)
-
-    try {
-      const parsed = JSON.parse(candidate)
-      return normalizeStructuredData(parsed)
-    } catch {
-      return null
-    }
-  }
-
-  const aiApiKey = process.env.AI_API_KEY || process.env.TRANSCRIPTION_API_KEY
-  if (!aiApiKey) {
-    return null
-  }
-
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+const callGroqGenerateContent = async ({ apiKey, model, messages }) => {
+  const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${aiApiKey}`,
+      Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: process.env.STRUCTURED_DATA_MODEL || 'gpt-4o-mini',
+      model,
       temperature: 0,
-      response_format: { type: 'json_object' },
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You convert doctor-patient consultation transcripts to structured clinical JSON. Return only a JSON object with keys: language_detected, symptoms, duration, severity, diagnosis, medications, additional_notes, missing_information. Use short plain text values.',
-        },
-        {
-          role: 'user',
-          content: text,
-        },
-      ],
+      messages,
+      max_tokens: 2000,
     }),
   })
 
   if (!response.ok) {
+    const errorPayload = await response.text().catch(() => '')
+    throw new Error(`Groq provider error: ${response.status} ${errorPayload}`)
+  }
+
+  const payload = await response.json()
+  const modelText = payload?.choices?.[0]?.message?.content || ''
+
+  return modelText
+}
+
+const transcribeWithGroq = async (file) => {
+  if (!file?.buffer?.length) {
+    throw new Error('Audio file buffer is empty.')
+  }
+
+  const groqApiKey = process.env.GROQ_API_KEY || process.env.TRANSCRIPTION_API_KEY
+  if (!groqApiKey) {
+    throw new Error('GROQ_API_KEY is not configured.')
+  }
+
+  const base64Audio = file.buffer.toString('base64')
+  const mimeType = file.mimetype || 'audio/webm'
+
+  const response = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${groqApiKey}`,
+    },
+    body: new URLSearchParams({
+      model: process.env.GROQ_TRANSCRIPTION_MODEL || process.env.TRANSCRIPTION_MODEL || 'whisper-large-v3',
+      file: base64Audio,
+      language: process.env.TRANSCRIPTION_LANGUAGE || 'auto',
+    }).toString(),
+  })
+
+  if (!response.ok) {
+    const errorPayload = await response.text().catch(() => '')
+    throw new Error(`Groq transcription error: ${response.status} ${errorPayload}`)
+  }
+
+  const payload = await response.json()
+  return payload.text || ''
+}
+
+const extractStructuredDataWithAI = async (transcription) => {
+  const text = typeof transcription === 'string' ? transcription.trim() : ''
+  if (!text) {
     return null
   }
 
-  const payload = await response.json().catch(() => null)
-  const content = payload?.choices?.[0]?.message?.content
-  if (!content || typeof content !== 'string') {
+  const groqApiKey = process.env.AI_API_KEY || process.env.GROQ_API_KEY || process.env.TRANSCRIPTION_API_KEY
+  if (!groqApiKey) {
     return null
   }
+
+  const model = process.env.GROQ_STRUCTURED_DATA_MODEL || process.env.STRUCTURED_DATA_MODEL || 'mixtral-8x7b-32768'
+  const content = await callGroqGenerateContent({
+    apiKey: groqApiKey,
+    model,
+    messages: [
+      {
+        role: 'system',
+        content:
+          'Convert this doctor-patient consultation into valid JSON only with keys: language_detected, symptoms, duration, severity, diagnosis, medications, additional_notes, missing_information. symptoms, medications, missing_information must be arrays. Return JSON only.',
+      },
+      {
+        role: 'user',
+        content: text,
+      },
+    ],
+  }).catch(() => '')
+
+  const candidate = extractJsonCandidate(content)
 
   try {
-    const parsed = JSON.parse(extractJsonCandidate(content))
+    const parsed = JSON.parse(candidate)
     return normalizeStructuredData(parsed)
   } catch {
     return null
@@ -492,12 +390,12 @@ const extractStructuredDataWithAI = async (transcription) => {
 }
 
 const getTranscriptionText = async ({ file }) => {
-  const provider = normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'gemini')
+  const provider = normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'groq')
 
-  if (provider === 'gemini') {
-    const geminiApiKey = process.env.GEMINI_API_KEY || process.env.TRANSCRIPTION_API_KEY
-    if (geminiApiKey) {
-      return transcribeWithGemini(file)
+  if (provider === 'groq') {
+    const groqApiKey = process.env.GROQ_API_KEY || process.env.TRANSCRIPTION_API_KEY
+    if (groqApiKey) {
+      return transcribeWithGroq(file)
     }
   }
 
@@ -505,7 +403,7 @@ const getTranscriptionText = async ({ file }) => {
     return transcribeWithOpenAI(file)
   }
 
-  const error = new Error('Transcription provider is not configured. Set GEMINI_API_KEY (recommended) and TRANSCRIPTION_PROVIDER=gemini.')
+  const error = new Error('Transcription provider is not configured. Set GROQ_API_KEY (recommended) and TRANSCRIPTION_PROVIDER=groq.')
   error.statusCode = 503
   throw error
 }
@@ -542,9 +440,9 @@ export const processClinicalUpload = async ({ file, patientId }) => {
   })
   const durationMs = Date.now() - startedAt
 
-  const hasAnyTranscriptionKey = !!(process.env.GEMINI_API_KEY || process.env.TRANSCRIPTION_API_KEY)
-  const transcriptionProvider = hasAnyTranscriptionKey ? normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'gemini') : 'none'
-  const aiProvider = aiStructuredData ? normalizeText(process.env.AI_PROVIDER || 'gemini') : 'rule_based'
+  const hasAnyTranscriptionKey = !!(process.env.GROQ_API_KEY || process.env.TRANSCRIPTION_API_KEY)
+  const transcriptionProvider = hasAnyTranscriptionKey ? normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'groq') : 'none'
+  const aiProvider = aiStructuredData ? normalizeText(process.env.AI_PROVIDER || 'groq') : 'rule_based'
 
   return {
     transcription,
