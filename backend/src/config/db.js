@@ -106,6 +106,8 @@ export const saveClinicalRecord = async (record) => {
       patientId: record.patientId,
       transcription: record.transcription || '',
       type: record.type || 'audio_upload',
+      audio: record.audio || {},
+      processing: record.processing || {},
       structuredData: record.structuredData || {},
       metadata: record.metadata || {},
     })

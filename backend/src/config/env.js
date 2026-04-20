@@ -7,6 +7,12 @@ export const env = {
   transcriptionProvider: process.env.TRANSCRIPTION_PROVIDER || 'openai',
   transcriptionApiKey: process.env.TRANSCRIPTION_API_KEY || '',
   transcriptionModel: process.env.TRANSCRIPTION_MODEL || 'gpt-4o-mini-transcribe',
+  aiProvider: process.env.AI_PROVIDER || 'openai',
+  aiApiKey: process.env.AI_API_KEY || process.env.TRANSCRIPTION_API_KEY || '',
+  structuredDataModel: process.env.STRUCTURED_DATA_MODEL || 'gpt-4o-mini',
+  cloudinaryCloudName: process.env.CLOUDINARY_CLOUD_NAME || '',
+  cloudinaryApiKey: process.env.CLOUDINARY_API_KEY || '',
+  cloudinaryApiSecret: process.env.CLOUDINARY_API_SECRET || '',
   demoPatientId: process.env.DEMO_PATIENT_ID || 'PATIENT001',
   demoPassword: process.env.DEMO_PASSWORD || '123456',
 }

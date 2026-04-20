@@ -20,10 +20,13 @@ export const uploadClinicalAudio = asyncHandler(async (req, res) => {
     patientId: req.user.patientId,
     type: 'audio_upload',
     transcription: result.transcription,
+    audio: result.audio,
+    processing: result.processing,
     structuredData: result.structuredData,
     metadata: {
       uploadedFileName: result.fileName,
       fileSize: Number(req.file.size || 0),
+      processingTime: Number(result.processing?.durationMs || 0),
     },
   })
 
@@ -60,6 +63,13 @@ export const saveClinicalData = asyncHandler(async (req, res) => {
     patientId: req.user.patientId,
     type: 'text_note',
     transcription,
+    processing: {
+      status: 'structured',
+      transcriptionProvider: 'manual_or_existing',
+      aiProvider: 'manual_or_rule_based',
+      durationMs: 0,
+      errorMessage: '',
+    },
     structuredData: normalizedStructuredData,
   })
 

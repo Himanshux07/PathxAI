@@ -1,3 +1,5 @@
+import { uploadAudioBufferToCloudinary } from './storage.service.js'
+
 const EMPTY_STRUCTURED_DATA = {
   language_detected: '',
   symptoms: [],
@@ -84,6 +86,20 @@ const formatList = (items) => {
   }
 
   return [...new Set(items.map((item) => item.trim()).filter(Boolean))]
+}
+
+const normalizeStructuredData = (value) => {
+  const structuredValue = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+
+  return {
+    ...EMPTY_STRUCTURED_DATA,
+    ...structuredValue,
+    symptoms: formatList(Array.isArray(structuredValue.symptoms) ? structuredValue.symptoms : []),
+    medications: formatList(Array.isArray(structuredValue.medications) ? structuredValue.medications : []),
+    missing_information: formatList(Array.isArray(structuredValue.missing_information) ? structuredValue.missing_information : []),
+    additional_notes:
+      typeof structuredValue.additional_notes === 'string' ? structuredValue.additional_notes : EMPTY_STRUCTURED_DATA.additional_notes,
+  }
 }
 
 const detectLanguage = (transcription) => {
@@ -212,6 +228,55 @@ const transcribeWithOpenAI = async (file) => {
   return payload.text || ''
 }
 
+const extractStructuredDataWithAI = async (transcription) => {
+  const text = typeof transcription === 'string' ? transcription.trim() : ''
+  const aiApiKey = process.env.AI_API_KEY || process.env.TRANSCRIPTION_API_KEY
+  if (!text || !aiApiKey) {
+    return null
+  }
+
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${aiApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: process.env.STRUCTURED_DATA_MODEL || 'gpt-4o-mini',
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You convert doctor-patient consultation transcripts to structured clinical JSON. Return only a JSON object with keys: language_detected, symptoms, duration, severity, diagnosis, medications, additional_notes, missing_information. Use short plain text values.',
+        },
+        {
+          role: 'user',
+          content: text,
+        },
+      ],
+    }),
+  })
+
+  if (!response.ok) {
+    return null
+  }
+
+  const payload = await response.json().catch(() => null)
+  const content = payload?.choices?.[0]?.message?.content
+  if (!content || typeof content !== 'string') {
+    return null
+  }
+
+  try {
+    const parsed = JSON.parse(content)
+    return normalizeStructuredData(parsed)
+  } catch {
+    return null
+  }
+}
+
 const getTranscriptionText = async ({ file, patientId }) => {
   const provider = normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'openai')
 
@@ -241,21 +306,43 @@ const formatFileSize = (bytes) => {
 }
 
 export const processClinicalUpload = async ({ file, patientId }) => {
+  const startedAt = Date.now()
   const fileName = file?.originalname || 'uploaded-audio'
   const fileSize = formatFileSize(file?.size || 0)
+  const audioStorage = await uploadAudioBufferToCloudinary({ file, patientId }).catch(() => null)
   const transcription = await getTranscriptionText({ file, patientId })
-  const structuredData = extractStructuredDataFromTranscription(transcription)
+  const aiStructuredData = await extractStructuredDataWithAI(transcription).catch(() => null)
+  const ruleBasedStructuredData = extractStructuredDataFromTranscription(transcription)
+  const structuredData = normalizeStructuredData(aiStructuredData || ruleBasedStructuredData)
+  const durationMs = Date.now() - startedAt
+
+  const transcriptionProvider = process.env.TRANSCRIPTION_API_KEY ? normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'openai') : 'none'
+  const aiProvider = aiStructuredData ? normalizeText(process.env.AI_PROVIDER || 'openai') : 'rule_based'
 
   return {
     transcription,
     structuredData: {
-      ...EMPTY_STRUCTURED_DATA,
       ...structuredData,
       additional_notes: `${structuredData.additional_notes}\nUploaded file ${fileName} (${fileSize}).`,
     },
+    audio: {
+      storageProvider: audioStorage?.storageProvider || 'none',
+      url: audioStorage?.url || '',
+      publicId: audioStorage?.publicId || '',
+      originalFileName: fileName,
+      mimeType: file?.mimetype || 'audio/webm',
+      sizeBytes: Number(file?.size || 0),
+    },
+    processing: {
+      status: 'structured',
+      transcriptionProvider,
+      aiProvider,
+      durationMs,
+      errorMessage: '',
+    },
     fileName,
     fileSize,
-    message: 'Audio processed and structured data prepared.',
+    message: 'Voice -> Text -> AI -> JSON completed and ready for database save.',
   }
 }
 

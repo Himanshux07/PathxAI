@@ -16,6 +16,56 @@ const clinicalRecordSchema = new mongoose.Schema(
       enum: ['audio_upload', 'audio_record', 'text_note'],
       default: 'audio_upload',
     },
+    audio: {
+      storageProvider: {
+        type: String,
+        enum: ['cloudinary', 'none'],
+        default: 'none',
+      },
+      url: {
+        type: String,
+        default: '',
+      },
+      publicId: {
+        type: String,
+        default: '',
+      },
+      originalFileName: {
+        type: String,
+        default: '',
+      },
+      mimeType: {
+        type: String,
+        default: '',
+      },
+      sizeBytes: {
+        type: Number,
+        default: 0,
+      },
+    },
+    processing: {
+      status: {
+        type: String,
+        enum: ['uploaded', 'transcribed', 'structured', 'failed'],
+        default: 'uploaded',
+      },
+      transcriptionProvider: {
+        type: String,
+        default: '',
+      },
+      aiProvider: {
+        type: String,
+        default: '',
+      },
+      durationMs: {
+        type: Number,
+        default: 0,
+      },
+      errorMessage: {
+        type: String,
+        default: '',
+      },
+    },
     structuredData: {
       language_detected: {
         type: String,
@@ -86,6 +136,7 @@ const clinicalRecordSchema = new mongoose.Schema(
 
 // Index for efficient queries by patient and date
 clinicalRecordSchema.index({ patientId: 1, createdAt: -1 })
+clinicalRecordSchema.index({ 'audio.publicId': 1 })
 
 // Virtual to get age of record
 clinicalRecordSchema.virtual('ageInHours').get(function () {
