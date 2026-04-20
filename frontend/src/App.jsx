@@ -12,13 +12,29 @@ const EMPTY_STRUCTURED_DATA = {
 }
 
 const initialAudioStatus = 'Not recorded'
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api'
+
+const loadJson = (value) => {
+  try {
+    return value ? JSON.parse(value) : null
+  } catch {
+    return null
+  }
+}
 
 function App() {
   const [theme, setTheme] = useState(() => {
     const savedTheme = localStorage.getItem('pathx-theme')
     return savedTheme === 'dark' ? 'dark' : 'light'
   })
-  const [patientId, setPatientId] = useState('')
+  const [authToken, setAuthToken] = useState(() => localStorage.getItem('pathx-token') || '')
+  const [currentUser, setCurrentUser] = useState(() => loadJson(localStorage.getItem('pathx-user')))
+  const [loginForm, setLoginForm] = useState({
+    patientId: '',
+    password: '',
+  })
+  const [isAuthenticating, setIsAuthenticating] = useState(false)
+  const [authError, setAuthError] = useState('')
   const [isRecording, setIsRecording] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
@@ -47,6 +63,22 @@ function App() {
   }, [theme])
 
   useEffect(() => {
+    if (authToken) {
+      localStorage.setItem('pathx-token', authToken)
+    } else {
+      localStorage.removeItem('pathx-token')
+    }
+  }, [authToken])
+
+  useEffect(() => {
+    if (currentUser) {
+      localStorage.setItem('pathx-user', JSON.stringify(currentUser))
+    } else {
+      localStorage.removeItem('pathx-user')
+    }
+  }, [currentUser])
+
+  useEffect(() => {
     return () => {
       if (mediaRecorderRef.current?.state === 'recording') {
         mediaRecorderRef.current.stop()
@@ -60,9 +92,111 @@ function App() {
     }
   }, [])
 
+  const patientId = currentUser?.patientId || ''
+
+  const handleLogout = () => {
+    setAuthToken('')
+    setCurrentUser(null)
+    setLoginForm({ patientId: '', password: '' })
+    setIsRecording(false)
+    setIsProcessing(false)
+    setIsSaving(false)
+    setAudioStatus(initialAudioStatus)
+    setTranscription('')
+    setStructuredData(EMPTY_STRUCTURED_DATA)
+    setSaveStatus('Not saved')
+    setErrorMessage('')
+    setAuthError('')
+    setRecordingSeconds(0)
+    setUploadedFileName('')
+
+    if (timerRef.current) {
+      clearInterval(timerRef.current)
+      timerRef.current = null
+    }
+
+    if (mediaRecorderRef.current?.state === 'recording') {
+      mediaRecorderRef.current.stop()
+    }
+
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop())
+    mediaStreamRef.current = null
+  }
+
+  const apiFetch = async (path, options = {}) => {
+    const headers = {
+      ...(options.headers || {}),
+    }
+
+    if (authToken) {
+      headers.Authorization = `Bearer ${authToken}`
+    }
+
+    const response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers,
+    })
+
+    if (response.status === 401) {
+      handleLogout()
+      throw new Error('Session expired. Please login again.')
+    }
+
+    return response
+  }
+
+  const handleLogin = async (event) => {
+    event.preventDefault()
+    setAuthError('')
+
+    if (!loginForm.patientId.trim() || !loginForm.password.trim()) {
+      setAuthError('Patient ID and password are required.')
+      return
+    }
+
+    setIsAuthenticating(true)
+
+    try {
+      const response = await fetch(`${API_BASE}/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          patientId: loginForm.patientId.trim(),
+          password: loginForm.password,
+        }),
+      })
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null)
+        throw new Error(payload?.message || 'Invalid login credentials')
+      }
+
+      const payload = await response.json()
+      setAuthToken(payload.token)
+      setCurrentUser(payload.user)
+      setLoginForm({ patientId: '', password: '' })
+      setAudioStatus('Ready')
+      setSaveStatus('Not saved')
+      setErrorMessage('')
+      setTranscription('')
+      setStructuredData(EMPTY_STRUCTURED_DATA)
+    } catch (error) {
+      setAuthError(error.message || 'Unable to login right now.')
+    } finally {
+      setIsAuthenticating(false)
+    }
+  }
+
   const startRecording = async () => {
     setErrorMessage('')
     setUploadedFileName('')
+
+    if (!authToken || !patientId) {
+      setErrorMessage('Please login first.')
+      return
+    }
 
     if (!navigator.mediaDevices?.getUserMedia) {
       setErrorMessage('Microphone access is not supported in this browser.')
@@ -117,10 +251,12 @@ function App() {
     }
 
     setIsRecording(false)
+
     if (timerRef.current) {
       clearInterval(timerRef.current)
       timerRef.current = null
     }
+
     mediaRecorderRef.current.stop()
   }
 
@@ -128,20 +264,18 @@ function App() {
     const formData = new FormData()
     const fileName = sourceLabel || `recording-${Date.now()}.webm`
     formData.append('audio', audioBlob, fileName)
-    if (patientId.trim()) {
-      formData.append('patientId', patientId.trim())
-    }
 
     setIsProcessing(true)
 
     try {
-      const response = await fetch('/upload', {
+      const response = await apiFetch('/clinical/upload', {
         method: 'POST',
         body: formData,
       })
 
       if (!response.ok) {
-        throw new Error('Upload request failed')
+        const payload = await response.json().catch(() => null)
+        throw new Error(payload?.message || 'Upload request failed')
       }
 
       const payload = await response.json()
@@ -152,9 +286,9 @@ function App() {
 
       setTranscription(payload.transcription || '')
       setStructuredData(nextStructuredData)
-      setAudioStatus('Processed successfully.')
+      setAudioStatus(payload.message || 'Processed successfully.')
     } catch (error) {
-      setErrorMessage('Failed to process audio. Please try again.')
+      setErrorMessage(error.message || 'Failed to process audio. Please try again.')
       setAudioStatus('Processing failed.')
     } finally {
       setIsProcessing(false)
@@ -164,6 +298,12 @@ function App() {
   const handleRecordedFileUpload = async (event) => {
     const file = event.target.files?.[0]
     if (!file) {
+      return
+    }
+
+    if (!authToken || !patientId) {
+      setErrorMessage('Please login first.')
+      event.target.value = ''
       return
     }
 
@@ -183,12 +323,18 @@ function App() {
   const saveToDatabase = async () => {
     setErrorMessage('')
 
-    if (!patientId.trim()) {
-      setErrorMessage('Patient ID is required to save data.')
+    if (!authToken || !patientId) {
+      setErrorMessage('Please login first.')
       return
     }
 
-    if (!transcription && Object.values(structuredData).every((value) => value === '' || (Array.isArray(value) && value.length === 0))) {
+    const hasProcessedData =
+      !!transcription ||
+      Object.values(structuredData).some((value) =>
+        Array.isArray(value) ? value.length > 0 : value !== '',
+      )
+
+    if (!hasProcessedData) {
       setErrorMessage('No processed data available to save yet.')
       return
     }
@@ -197,13 +343,13 @@ function App() {
     setSaveStatus('Saving...')
 
     try {
-      const response = await fetch('/save', {
+      const response = await apiFetch('/clinical/save', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          patientId: patientId.trim(),
+          patientId,
           transcription,
           structuredData,
           savedAt: new Date().toISOString(),
@@ -211,24 +357,18 @@ function App() {
       })
 
       if (!response.ok) {
-        throw new Error('Save request failed')
+        const payload = await response.json().catch(() => null)
+        throw new Error(payload?.message || 'Save request failed')
       }
 
       setSaveStatus('Saved successfully.')
     } catch (error) {
       setSaveStatus('Save failed.')
-      setErrorMessage('Unable to save data to database right now.')
+      setErrorMessage(error.message || 'Unable to save data to database right now.')
     } finally {
       setIsSaving(false)
     }
   }
-
-  const canSave = !isSaving && !isProcessing && !isRecording
-  const hasProcessedData =
-    !!transcription ||
-    Object.values(structuredData).some((value) =>
-      Array.isArray(value) ? value.length > 0 : value !== '',
-    )
 
   const recordingLabel = isRecording
     ? `Live recording ${Math.floor(recordingSeconds / 60)
@@ -236,30 +376,135 @@ function App() {
         .padStart(2, '0')}:${(recordingSeconds % 60).toString().padStart(2, '0')}`
     : 'Mic idle'
 
+  const hasProcessedData =
+    !!transcription ||
+    Object.values(structuredData).some((value) =>
+      Array.isArray(value) ? value.length > 0 : value !== '',
+    )
+
+  if (!authToken || !currentUser) {
+    return (
+      <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.18),_transparent_30%),radial-gradient(circle_at_bottom_right,_rgba(16,185,129,0.16),_transparent_28%),linear-gradient(135deg,_#f8fafc,_#eefcf8)] px-4 py-6 transition-colors dark:bg-[radial-gradient(circle_at_top_left,_rgba(8,145,178,0.24),_transparent_32%),radial-gradient(circle_at_bottom_right,_rgba(16,185,129,0.18),_transparent_28%),linear-gradient(135deg,_#020617,_#0f172a)] md:px-8 md:py-8">
+        <div className="mx-auto flex min-h-[calc(100vh-3rem)] w-full max-w-6xl items-center justify-center">
+          <div className="grid w-full overflow-hidden rounded-[2rem] border border-white/60 bg-white/85 shadow-[0_24px_80px_rgba(14,165,233,0.12)] backdrop-blur dark:border-slate-700 dark:bg-slate-900/85 dark:shadow-black/30 lg:grid-cols-2">
+            <section className="bg-gradient-to-br from-cyan-600 via-sky-600 to-emerald-600 p-6 text-white md:p-8">
+              <div className="inline-flex rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.28em] text-cyan-50">
+                Patient Login
+              </div>
+              <h1 className="mt-4 text-3xl font-bold tracking-tight md:text-4xl">Patient ID is your login identity.</h1>
+              <p className="mt-3 max-w-xl text-sm text-cyan-50/95 md:text-base">
+                Use your patient ID to sign in. The password confirms ownership of the record and keeps the workflow tied to the right patient.
+              </p>
+              <div className="mt-8 space-y-3 rounded-[1.4rem] border border-white/15 bg-white/10 p-4 text-sm text-cyan-50">
+                <p className="font-semibold">What login means here</p>
+                <p>Patient ID = account identifier.</p>
+                <p>Password = authentication check.</p>
+              </div>
+            </section>
+
+            <section className="p-6 md:p-8">
+              <div className="mb-6 flex items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100">Sign in</h2>
+                  <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">Access your clinical assistant session.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setTheme((prevTheme) => (prevTheme === 'light' ? 'dark' : 'light'))}
+                  className="rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+                >
+                  {theme === 'light' ? 'Dark Mode' : 'Light Mode'}
+                </button>
+              </div>
+
+              <form className="space-y-4" onSubmit={handleLogin}>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-200" htmlFor="loginPatientId">
+                    Patient ID
+                  </label>
+                  <input
+                    id="loginPatientId"
+                    type="text"
+                    value={loginForm.patientId}
+                    onChange={(event) => setLoginForm((current) => ({ ...current, patientId: event.target.value }))}
+                    placeholder="PATIENT001"
+                    className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-cyan-400 dark:focus:ring-cyan-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-200" htmlFor="loginPassword">
+                    Password
+                  </label>
+                  <input
+                    id="loginPassword"
+                    type="password"
+                    value={loginForm.password}
+                    onChange={(event) => setLoginForm((current) => ({ ...current, password: event.target.value }))}
+                    placeholder="••••••••"
+                    className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-cyan-400 dark:focus:ring-cyan-900"
+                  />
+                </div>
+
+                {authError && <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 dark:bg-rose-500/10 dark:text-rose-200">{authError}</p>}
+
+                <button
+                  type="submit"
+                  disabled={isAuthenticating}
+                  className="w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-slate-950/20 transition hover:-translate-y-0.5 hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400 dark:bg-cyan-500 dark:text-slate-950 dark:hover:bg-cyan-400"
+                >
+                  {isAuthenticating ? 'Signing in...' : 'Login'}
+                </button>
+
+                <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">
+                  Demo login is seeded on the backend for development. Replace it later with your database and env settings.
+                </p>
+              </form>
+            </section>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.14),_transparent_34%),radial-gradient(circle_at_bottom_right,_rgba(16,185,129,0.12),_transparent_28%),linear-gradient(135deg,_#f8fafc,_#eefcf8)] transition-colors dark:bg-[radial-gradient(circle_at_top_left,_rgba(8,145,178,0.25),_transparent_32%),radial-gradient(circle_at_bottom_right,_rgba(16,185,129,0.16),_transparent_28%),linear-gradient(135deg,_#020617,_#0f172a)]">
       <div className="mx-auto w-full max-w-6xl p-4 md:p-8">
         <div className="overflow-hidden rounded-[2rem] border border-white/60 bg-white/85 shadow-[0_24px_80px_rgba(14,165,233,0.12)] backdrop-blur dark:border-slate-700 dark:bg-slate-900/85 dark:shadow-black/30">
           <header className="border-b border-slate-200/80 bg-gradient-to-r from-cyan-600 via-sky-600 to-emerald-600 px-5 py-5 text-white dark:border-slate-700 md:px-8 md:py-7">
-            <div>
-              <div className="inline-flex rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-medium uppercase tracking-[0.28em] text-cyan-50">
-                Clinical Voice Assistant
+            <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+              <div>
+                <div className="inline-flex rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-medium uppercase tracking-[0.28em] text-cyan-50">
+                  Clinical Voice Assistant
+                </div>
+                <h1 className="mt-3 text-2xl font-bold tracking-tight md:text-4xl">
+                  Capture consults, structure data, and save fast.
+                </h1>
+                <p className="mt-2 max-w-2xl text-sm text-cyan-50/95 md:text-base">
+                  Record live audio, upload an existing file, and store the structured note with the patient session.
+                </p>
               </div>
-              <h1 className="mt-3 text-2xl font-bold tracking-tight md:text-4xl">
-                Capture consults, structure data, and save fast.
-              </h1>
-              <p className="mt-2 max-w-2xl text-sm text-cyan-50/95 md:text-base">
-                Record live audio, upload an existing file, and get structured medical output in a single screen.
-              </p>
-            </div>
 
-            <button
-              type="button"
-              onClick={() => setTheme((prevTheme) => (prevTheme === 'light' ? 'dark' : 'light'))}
-              className="mt-4 inline-flex items-center rounded-full border border-white/25 bg-white/15 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/25 md:mt-0"
-            >
-              {theme === 'light' ? 'Switch to Dark' : 'Switch to Light'}
-            </button>
+              <div className="flex flex-wrap gap-3">
+                <span className="rounded-full border border-white/20 bg-white/10 px-3 py-2 text-xs font-semibold text-cyan-50">
+                  Patient: {patientId}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setTheme((prevTheme) => (prevTheme === 'light' ? 'dark' : 'light'))}
+                  className="rounded-full border border-white/25 bg-white/15 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/25"
+                >
+                  {theme === 'light' ? 'Switch to Dark' : 'Switch to Light'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="rounded-full border border-white/25 bg-white/15 px-4 py-2 text-sm font-semibold text-white transition hover:bg-white/25"
+                >
+                  Logout
+                </button>
+              </div>
+            </div>
           </header>
 
           <main className="grid gap-6 p-5 md:p-8 lg:grid-cols-[0.95fr_1.05fr]">
@@ -280,20 +525,6 @@ function App() {
                 >
                   {isRecording ? 'Recording' : 'Ready'}
                 </span>
-              </div>
-
-              <div>
-                <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-200" htmlFor="patientId">
-                  Patient ID
-                </label>
-                <input
-                  id="patientId"
-                  type="text"
-                  value={patientId}
-                  onChange={(event) => setPatientId(event.target.value)}
-                  placeholder="e.g. OPD-23911"
-                  className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-cyan-400 dark:focus:ring-cyan-900"
-                />
               </div>
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -327,7 +558,7 @@ function App() {
                 <button
                   type="button"
                   onClick={saveToDatabase}
-                  disabled={!canSave || !hasProcessedData}
+                  disabled={!hasProcessedData || isSaving || isProcessing || isRecording}
                   className="rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:bg-emerald-300 dark:disabled:bg-emerald-800"
                 >
                   Save to Database
@@ -354,6 +585,7 @@ function App() {
                   )}
                 </div>
                 <p className="mt-3 text-slate-700 dark:text-slate-200">Save status: {saveStatus}</p>
+                <p className="mt-1 text-slate-500 dark:text-slate-400">Logged in as patient ID: {patientId}</p>
                 {isProcessing && <p className="mt-2 font-medium text-cyan-700 dark:text-cyan-300">Processing audio...</p>}
                 {isSaving && <p className="mt-2 font-medium text-emerald-700 dark:text-emerald-300">Saving to database...</p>}
                 {errorMessage && <p className="mt-2 font-medium text-rose-700 dark:text-rose-300">{errorMessage}</p>}
