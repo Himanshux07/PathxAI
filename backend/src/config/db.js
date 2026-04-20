@@ -1,123 +1,128 @@
-import bcrypt from 'bcryptjs'
-import { MongoClient } from 'mongodb'
+import mongoose from 'mongoose'
+import { User, ClinicalRecord } from '../models/index.js'
 import { env } from './env.js'
 
-let mongoClient = null
-let db = null
+let isConnected = false
 
-const getDatabase = async () => {
-  if (!db) {
-    if (!env.databaseUrl) {
-      throw new Error('DATABASE_URL is not configured in backend/.env')
-    }
+export const connectDatabase = async () => {
+  if (isConnected) {
+    return mongoose.connection
+  }
 
-    mongoClient = new MongoClient(env.databaseUrl, {
+  if (!env.databaseUrl) {
+    throw new Error('DATABASE_URL is not configured in backend/.env')
+  }
+
+  try {
+    await mongoose.connect(env.databaseUrl, {
       serverSelectionTimeoutMS: 5000,
+      connectTimeoutMS: 10000,
     })
 
-    await mongoClient.connect()
-    db = mongoClient.db()
-
-    await db.collection('users').createIndex({ patientId: 1 }, { unique: true })
-    await db.collection('records').createIndex({ patientId: 1 })
-
-    console.log('MongoDB connected successfully')
+    isConnected = true
+    console.log('✅ MongoDB connected successfully via Mongoose')
+    return mongoose.connection
+  } catch (error) {
+    console.error('❌ MongoDB connection failed:', error.message)
+    throw error
   }
-
-  return db
-}
-
-const seedDemoUser = async (database) => {
-  const usersCollection = database.collection('users')
-  const existingDemo = await usersCollection.findOne({ patientId: env.demoPatientId })
-
-  if (existingDemo) {
-    return
-  }
-
-  const passwordHash = await bcrypt.hash(env.demoPassword, 10)
-  await usersCollection.insertOne({
-    patientId: env.demoPatientId,
-    name: 'Demo Patient',
-    role: 'patient',
-    passwordHash,
-    createdAt: new Date(),
-  })
-
-  console.log(`Demo user seeded: ${env.demoPatientId}`)
-}
-
-export const initializeDatabase = async () => {
-  const database = await getDatabase()
-  await seedDemoUser(database)
 }
 
 export const closeDatabase = async () => {
-  if (mongoClient) {
-    await mongoClient.close()
-    mongoClient = null
-    db = null
+  if (isConnected) {
+    await mongoose.disconnect()
+    isConnected = false
+    console.log('MongoDB connection closed')
   }
+}
+
+export const seedDemoUser = async () => {
+  try {
+    const existingDemo = await User.findOne({ patientId: env.demoPatientId })
+
+    if (existingDemo) {
+      return existingDemo
+    }
+
+    const newUser = new User({
+      patientId: env.demoPatientId,
+      name: 'Demo Patient',
+      email: 'demo@pathxai.local',
+      passwordHash: env.demoPassword,
+      role: 'patient',
+      status: 'active',
+    })
+
+    await newUser.save()
+    console.log(`✅ Demo user seeded: ${env.demoPatientId}`)
+    return newUser
+  } catch (error) {
+    console.error('Error seeding demo user:', error.message)
+    throw error
+  }
+}
+
+export const initializeDatabase = async () => {
+  await connectDatabase()
+  await seedDemoUser()
 }
 
 export const findUserByPatientId = async (patientId) => {
-  const database = await getDatabase()
-  return database
-    .collection('users')
-    .findOne({ patientId: { $regex: `^${patientId}$`, $options: 'i' } })
+  try {
+    return await User.findOne({ patientId: { $regex: `^${patientId}$`, $options: 'i' } }).select('+passwordHash')
+  } catch (error) {
+    console.error('Error finding user:', error.message)
+    throw error
+  }
 }
 
-export const createUser = async ({ patientId, name, password, role = 'patient' }) => {
-  const database = await getDatabase()
-  const usersCollection = database.collection('users')
+export const createUser = async ({ patientId, name, password, email = '', role = 'patient' }) => {
+  try {
+    const existingUser = await User.findOne({ patientId: { $regex: `^${patientId}$`, $options: 'i' } })
+    if (existingUser) {
+      throw new Error('Patient ID already exists')
+    }
 
-  const existingUser = await usersCollection.findOne({ patientId: { $regex: `^${patientId}$`, $options: 'i' } })
-  if (existingUser) {
-    return existingUser
-  }
+    const newUser = new User({
+      patientId,
+      name: name || patientId,
+      email,
+      passwordHash: password,
+      role,
+      status: 'active',
+    })
 
-  const passwordHash = await bcrypt.hash(password, 10)
-  const result = await usersCollection.insertOne({
-    patientId,
-    name: name || patientId,
-    role,
-    passwordHash,
-    createdAt: new Date(),
-  })
-
-  return {
-    _id: result.insertedId,
-    patientId,
-    name: name || patientId,
-    role,
-    createdAt: new Date(),
+    await newUser.save()
+    return newUser.toJSON()
+  } catch (error) {
+    console.error('Error creating user:', error.message)
+    throw error
   }
 }
 
 export const saveClinicalRecord = async (record) => {
-  const database = await getDatabase()
-  const recordsCollection = database.collection('records')
+  try {
+    const newRecord = new ClinicalRecord({
+      patientId: record.patientId,
+      transcription: record.transcription || '',
+      type: record.type || 'audio_upload',
+      structuredData: record.structuredData || {},
+      metadata: record.metadata || {},
+    })
 
-  const result = await recordsCollection.insertOne({
-    patientId: record.patientId,
-    transcription: record.transcription || '',
-    structuredData: record.structuredData || {},
-    savedAt: record.savedAt || new Date(),
-    createdAt: new Date(),
-  })
-
-  return {
-    _id: result.insertedId,
-    ...record,
-    createdAt: new Date(),
+    await newRecord.save()
+    return newRecord.toJSON()
+  } catch (error) {
+    console.error('Error saving clinical record:', error.message)
+    throw error
   }
 }
 
 export const listClinicalRecordsByPatientId = async (patientId) => {
-  const database = await getDatabase()
-  return database
-    .collection('records')
-    .find({ patientId })
-    .sort({ createdAt: -1 })
-    .toArray()
+  try {
+    return await ClinicalRecord.find({ patientId }).sort({ createdAt: -1 }).lean()
+  } catch (error) {
+    console.error('Error fetching clinical records:', error.message)
+    throw error
+  }
 }

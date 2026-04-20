@@ -184,7 +184,16 @@ const transcribeWithOpenAI = async (file) => {
   const formData = new FormData()
   const audioBlob = new Blob([file.buffer], { type: file.mimetype || 'audio/webm' })
   formData.append('file', audioBlob, file.originalname || 'audio.webm')
-  formData.append('model', process.env.TRANSCRIPTION_MODEL || 'whisper-1')
+  formData.append('model', process.env.TRANSCRIPTION_MODEL || 'gpt-4o-mini-transcribe')
+  formData.append(
+    'prompt',
+    process.env.TRANSCRIPTION_PROMPT ||
+      'This is a medical consultation between a patient and a doctor in Hindi/Hinglish/English. Preserve full meaning and output clean conversational text with speaker labels like "Patient:" and "Doctor:" when possible.',
+  )
+
+  if (process.env.TRANSCRIPTION_LANGUAGE) {
+    formData.append('language', process.env.TRANSCRIPTION_LANGUAGE)
+  }
 
   const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
@@ -204,9 +213,9 @@ const transcribeWithOpenAI = async (file) => {
 }
 
 const getTranscriptionText = async ({ file, patientId }) => {
-  const provider = normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'mock')
+  const provider = normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'openai')
 
-  if (provider === 'openai' && process.env.TRANSCRIPTION_API_KEY) {
+  if (provider !== 'mock' && process.env.TRANSCRIPTION_API_KEY) {
     return transcribeWithOpenAI(file)
   }
 

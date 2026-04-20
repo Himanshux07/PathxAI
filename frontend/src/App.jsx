@@ -14,6 +14,8 @@ const EMPTY_STRUCTURED_DATA = {
 const initialAudioStatus = 'Not recorded'
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api'
 
+const stringifyStructuredData = (value) => JSON.stringify(value, null, 2)
+
 const loadJson = (value) => {
   try {
     return value ? JSON.parse(value) : null
@@ -52,6 +54,40 @@ const getPrescriptionTitle = (record) => {
   return record?.type === 'audio_upload' ? 'Audio consultation' : 'Clinical note'
 }
 
+const formatRecordDay = (value) => {
+  if (!value) {
+    return 'Unknown date'
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return 'Unknown date'
+  }
+
+  return new Intl.DateTimeFormat('en-IN', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(date)
+}
+
+const groupRecordsByDay = (records = []) => {
+  const grouped = new Map()
+
+  for (const record of records) {
+    const dayKey = formatRecordDay(record?.createdAt)
+    const existingGroup = grouped.get(dayKey) || []
+    existingGroup.push(record)
+    grouped.set(dayKey, existingGroup)
+  }
+
+  return Array.from(grouped.entries()).map(([dayLabel, dayRecords]) => ({
+    dayLabel,
+    records: dayRecords,
+  }))
+}
+
 function App() {
   const [theme, setTheme] = useState(() => {
     const savedTheme = localStorage.getItem('pathx-theme')
@@ -59,9 +95,16 @@ function App() {
   })
   const [authToken, setAuthToken] = useState(() => localStorage.getItem('pathx-token') || '')
   const [currentUser, setCurrentUser] = useState(() => loadJson(localStorage.getItem('pathx-user')))
+  const [isRegisterMode, setIsRegisterMode] = useState(false)
   const [loginForm, setLoginForm] = useState({
     patientId: '',
     password: '',
+  })
+  const [registerForm, setRegisterForm] = useState({
+    patientId: '',
+    name: '',
+    password: '',
+    passwordConfirm: '',
   })
   const [isAuthenticating, setIsAuthenticating] = useState(false)
   const [authError, setAuthError] = useState('')
@@ -71,6 +114,8 @@ function App() {
   const [audioStatus, setAudioStatus] = useState(initialAudioStatus)
   const [transcription, setTranscription] = useState('')
   const [structuredData, setStructuredData] = useState(EMPTY_STRUCTURED_DATA)
+  const [structuredDataInput, setStructuredDataInput] = useState(() => stringifyStructuredData(EMPTY_STRUCTURED_DATA))
+  const [structuredDataInputError, setStructuredDataInputError] = useState('')
   const [saveStatus, setSaveStatus] = useState('Not saved')
   const [errorMessage, setErrorMessage] = useState('')
   const [recordingSeconds, setRecordingSeconds] = useState(0)
@@ -166,6 +211,8 @@ function App() {
     setAudioStatus(initialAudioStatus)
     setTranscription('')
     setStructuredData(EMPTY_STRUCTURED_DATA)
+    setStructuredDataInput(stringifyStructuredData(EMPTY_STRUCTURED_DATA))
+    setStructuredDataInputError('')
     setSaveStatus('Not saved')
     setErrorMessage('')
     setAuthError('')
@@ -245,9 +292,66 @@ function App() {
       setErrorMessage('')
       setTranscription('')
       setStructuredData(EMPTY_STRUCTURED_DATA)
+      setStructuredDataInput(stringifyStructuredData(EMPTY_STRUCTURED_DATA))
+      setStructuredDataInputError('')
       setPreviousRecords([])
     } catch (error) {
       setAuthError(error.message || 'Unable to login right now.')
+    } finally {
+      setIsAuthenticating(false)
+    }
+  }
+
+  const handleRegister = async (event) => {
+    event.preventDefault()
+    setAuthError('')
+
+    if (!registerForm.patientId.trim() || !registerForm.name.trim() || !registerForm.password.trim() || !registerForm.passwordConfirm.trim()) {
+      setAuthError('All fields are required.')
+      return
+    }
+
+    if (registerForm.password !== registerForm.passwordConfirm) {
+      setAuthError('Passwords do not match.')
+      return
+    }
+
+    setIsAuthenticating(true)
+
+    try {
+      const response = await fetch(`${API_BASE}/auth/register`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          patientId: registerForm.patientId.trim(),
+          name: registerForm.name.trim(),
+          password: registerForm.password,
+          passwordConfirm: registerForm.passwordConfirm,
+        }),
+      })
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null)
+        throw new Error(payload?.message || 'Registration failed')
+      }
+
+      const payload = await response.json()
+      setAuthToken(payload.token)
+      setCurrentUser(payload.user)
+      setRegisterForm({ patientId: '', name: '', password: '', passwordConfirm: '' })
+      setIsRegisterMode(false)
+      setAudioStatus('Ready')
+      setSaveStatus('Not saved')
+      setErrorMessage('')
+      setTranscription('')
+      setStructuredData(EMPTY_STRUCTURED_DATA)
+      setStructuredDataInput(stringifyStructuredData(EMPTY_STRUCTURED_DATA))
+      setStructuredDataInputError('')
+      setPreviousRecords([])
+    } catch (error) {
+      setAuthError(error.message || 'Unable to register right now.')
     } finally {
       setIsAuthenticating(false)
     }
@@ -350,6 +454,8 @@ function App() {
 
       setTranscription(payload.transcription || '')
       setStructuredData(nextStructuredData)
+      setStructuredDataInput(stringifyStructuredData(nextStructuredData))
+      setStructuredDataInputError('')
       setAudioStatus(payload.message || 'Processed successfully.')
     } catch (error) {
       setErrorMessage(error.message || 'Failed to process audio. Please try again.')
@@ -384,6 +490,23 @@ function App() {
     fileInputRef.current?.click()
   }
 
+  const handleStructuredDataInputChange = (value) => {
+    setStructuredDataInput(value)
+
+    try {
+      const parsed = value ? JSON.parse(value) : EMPTY_STRUCTURED_DATA
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        setStructuredDataInputError('Structured JSON must be an object.')
+        return
+      }
+
+      setStructuredData(parsed)
+      setStructuredDataInputError('')
+    } catch {
+      setStructuredDataInputError('Invalid JSON format. Please fix before saving.')
+    }
+  }
+
   const saveToDatabase = async () => {
     setErrorMessage('')
 
@@ -392,9 +515,23 @@ function App() {
       return
     }
 
+    let parsedStructuredData = structuredData
+    try {
+      parsedStructuredData = structuredDataInput ? JSON.parse(structuredDataInput) : EMPTY_STRUCTURED_DATA
+      if (!parsedStructuredData || typeof parsedStructuredData !== 'object' || Array.isArray(parsedStructuredData)) {
+        setStructuredDataInputError('Structured JSON must be an object.')
+        setErrorMessage('Please fix JSON before uploading to database.')
+        return
+      }
+    } catch {
+      setStructuredDataInputError('Invalid JSON format. Please fix before saving.')
+      setErrorMessage('Please fix JSON before uploading to database.')
+      return
+    }
+
     const hasProcessedData =
       !!transcription ||
-      Object.values(structuredData).some((value) =>
+      Object.values(parsedStructuredData).some((value) =>
         Array.isArray(value) ? value.length > 0 : value !== '',
       )
 
@@ -415,7 +552,7 @@ function App() {
         body: JSON.stringify({
           patientId,
           transcription,
-          structuredData,
+          structuredData: parsedStructuredData,
           savedAt: new Date().toISOString(),
         }),
       })
@@ -451,6 +588,7 @@ function App() {
       Array.isArray(value) ? value.length > 0 : value !== '',
     )
 
+  const groupedPreviousRecords = groupRecordsByDay(previousRecords)
   if (!authToken || !currentUser) {
     return (
       <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(14,165,233,0.18),_transparent_30%),radial-gradient(circle_at_bottom_right,_rgba(16,185,129,0.16),_transparent_28%),linear-gradient(135deg,_#f8fafc,_#eefcf8)] px-4 py-6 transition-colors dark:bg-[radial-gradient(circle_at_top_left,_rgba(8,145,178,0.24),_transparent_32%),radial-gradient(circle_at_bottom_right,_rgba(16,185,129,0.18),_transparent_28%),linear-gradient(135deg,_#020617,_#0f172a)] md:px-8 md:py-8">
@@ -474,8 +612,8 @@ function App() {
             <section className="p-6 md:p-8">
               <div className="mb-6 flex items-center justify-between gap-4">
                 <div>
-                  <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100">Sign in</h2>
-                  <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">Access your clinical assistant session.</p>
+                  <h2 className="text-2xl font-bold text-slate-900 dark:text-slate-100">{isRegisterMode ? 'Create Account' : 'Sign in'}</h2>
+                  <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">{isRegisterMode ? 'Register as a new patient.' : 'Access your clinical assistant session.'}</p>
                 </div>
                 <button
                   type="button"
@@ -486,49 +624,149 @@ function App() {
                 </button>
               </div>
 
-              <form className="space-y-4" onSubmit={handleLogin}>
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-200" htmlFor="loginPatientId">
-                    Patient ID
-                  </label>
-                  <input
-                    id="loginPatientId"
-                    type="text"
-                    value={loginForm.patientId}
-                    onChange={(event) => setLoginForm((current) => ({ ...current, patientId: event.target.value }))}
-                    placeholder="PATIENT001"
-                    className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-cyan-400 dark:focus:ring-cyan-900"
-                  />
-                </div>
+              {isRegisterMode ? (
+                <form className="space-y-4" onSubmit={handleRegister}>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-200" htmlFor="registerPatientId">
+                      Patient ID
+                    </label>
+                    <input
+                      id="registerPatientId"
+                      type="text"
+                      value={registerForm.patientId}
+                      onChange={(event) => setRegisterForm((current) => ({ ...current, patientId: event.target.value }))}
+                      placeholder="Enter your patient ID"
+                      className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-cyan-400 dark:focus:ring-cyan-900"
+                    />
+                  </div>
 
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-200" htmlFor="loginPassword">
-                    Password
-                  </label>
-                  <input
-                    id="loginPassword"
-                    type="password"
-                    value={loginForm.password}
-                    onChange={(event) => setLoginForm((current) => ({ ...current, password: event.target.value }))}
-                    placeholder="••••••••"
-                    className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-cyan-400 dark:focus:ring-cyan-900"
-                  />
-                </div>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-200" htmlFor="registerName">
+                      Full Name
+                    </label>
+                    <input
+                      id="registerName"
+                      type="text"
+                      value={registerForm.name}
+                      onChange={(event) => setRegisterForm((current) => ({ ...current, name: event.target.value }))}
+                      placeholder="Your full name"
+                      className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-cyan-400 dark:focus:ring-cyan-900"
+                    />
+                  </div>
 
-                {authError && <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 dark:bg-rose-500/10 dark:text-rose-200">{authError}</p>}
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-200" htmlFor="registerPassword">
+                      Password
+                    </label>
+                    <input
+                      id="registerPassword"
+                      type="password"
+                      value={registerForm.password}
+                      onChange={(event) => setRegisterForm((current) => ({ ...current, password: event.target.value }))}
+                      placeholder="••••••••"
+                      className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-cyan-400 dark:focus:ring-cyan-900"
+                    />
+                  </div>
 
-                <button
-                  type="submit"
-                  disabled={isAuthenticating}
-                  className="w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-slate-950/20 transition hover:-translate-y-0.5 hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400 dark:bg-cyan-500 dark:text-slate-950 dark:hover:bg-cyan-400"
-                >
-                  {isAuthenticating ? 'Signing in...' : 'Login'}
-                </button>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-200" htmlFor="registerPasswordConfirm">
+                      Confirm Password
+                    </label>
+                    <input
+                      id="registerPasswordConfirm"
+                      type="password"
+                      value={registerForm.passwordConfirm}
+                      onChange={(event) => setRegisterForm((current) => ({ ...current, passwordConfirm: event.target.value }))}
+                      placeholder="••••••••"
+                      className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-cyan-400 dark:focus:ring-cyan-900"
+                    />
+                  </div>
 
-                <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">
-                  Demo login is seeded on the backend for development. Replace it later with your database and env settings.
-                </p>
-              </form>
+                  {authError && <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 dark:bg-rose-500/10 dark:text-rose-200">{authError}</p>}
+
+                  <button
+                    type="submit"
+                    disabled={isAuthenticating}
+                    className="w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-slate-950/20 transition hover:-translate-y-0.5 hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400 dark:bg-cyan-500 dark:text-slate-950 dark:hover:bg-cyan-400"
+                  >
+                    {isAuthenticating ? 'Creating account...' : 'Create Account'}
+                  </button>
+
+                  <div className="text-center text-sm text-slate-600 dark:text-slate-400">
+                    Already have an account?{' '}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsRegisterMode(false)
+                        setAuthError('')
+                        setRegisterForm({ patientId: '', name: '', password: '', passwordConfirm: '' })
+                      }}
+                      className="font-medium text-cyan-600 transition hover:text-cyan-700 dark:text-cyan-400 dark:hover:text-cyan-300"
+                    >
+                      Sign in instead
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <form className="space-y-4" onSubmit={handleLogin}>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-200" htmlFor="loginPatientId">
+                      Patient ID
+                    </label>
+                    <input
+                      id="loginPatientId"
+                      type="text"
+                      value={loginForm.patientId}
+                      onChange={(event) => setLoginForm((current) => ({ ...current, patientId: event.target.value }))}
+                      placeholder="PATIENT001"
+                      className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-cyan-400 dark:focus:ring-cyan-900"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-slate-700 dark:text-slate-200" htmlFor="loginPassword">
+                      Password
+                    </label>
+                    <input
+                      id="loginPassword"
+                      type="password"
+                      value={loginForm.password}
+                      onChange={(event) => setLoginForm((current) => ({ ...current, password: event.target.value }))}
+                      placeholder="••••••••"
+                      className="w-full rounded-2xl border border-slate-300 bg-white px-4 py-3 text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-cyan-400 dark:focus:ring-cyan-900"
+                    />
+                  </div>
+
+                  {authError && <p className="rounded-2xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700 dark:bg-rose-500/10 dark:text-rose-200">{authError}</p>}
+
+                  <button
+                    type="submit"
+                    disabled={isAuthenticating}
+                    className="w-full rounded-2xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-slate-950/20 transition hover:-translate-y-0.5 hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400 dark:bg-cyan-500 dark:text-slate-950 dark:hover:bg-cyan-400"
+                  >
+                    {isAuthenticating ? 'Signing in...' : 'Login'}
+                  </button>
+
+                  <div className="text-center text-sm text-slate-600 dark:text-slate-400">
+                    Don't have an account?{' '}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsRegisterMode(true)
+                        setAuthError('')
+                        setLoginForm({ patientId: '', password: '' })
+                      }}
+                      className="font-medium text-cyan-600 transition hover:text-cyan-700 dark:text-cyan-400 dark:hover:text-cyan-300"
+                    >
+                      Register here
+                    </button>
+                  </div>
+
+                  <p className="text-xs leading-5 text-slate-500 dark:text-slate-400">
+                    Demo login is seeded on the backend for development. Replace it later with your database and env settings.
+                  </p>
+                </form>
+              )}
             </section>
           </div>
         </div>
@@ -666,18 +904,27 @@ function App() {
                 <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
                   Transcription
                 </h2>
-                <p className="mt-2 min-h-28 whitespace-pre-wrap text-sm leading-6 text-slate-800 dark:text-slate-100">
-                  {transcription || 'Transcribed conversation will appear here.'}
-                </p>
+                <textarea
+                  value={transcription}
+                  onChange={(event) => setTranscription(event.target.value)}
+                  placeholder="Transcribed conversation will appear here and can be edited manually."
+                  className="mt-2 min-h-28 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm leading-6 text-slate-800 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-cyan-400 dark:focus:ring-cyan-900"
+                />
               </div>
 
               <div className="rounded-[1.6rem] border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-800/50">
                 <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-300">
                   Structured JSON
                 </h2>
-                <pre className="mt-2 overflow-x-auto rounded-xl bg-slate-900 p-4 text-xs leading-6 text-slate-100 md:text-sm">
-                  {JSON.stringify(structuredData, null, 2)}
-                </pre>
+                <textarea
+                  value={structuredDataInput}
+                  onChange={(event) => handleStructuredDataInputChange(event.target.value)}
+                  spellCheck={false}
+                  className="mt-2 min-h-64 w-full rounded-xl border border-slate-700 bg-slate-900 p-4 font-mono text-xs leading-6 text-slate-100 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-300 md:text-sm"
+                />
+                {structuredDataInputError && (
+                  <p className="mt-2 text-xs font-medium text-rose-700 dark:text-rose-300">{structuredDataInputError}</p>
+                )}
               </div>
 
               <div className="rounded-[1.6rem] border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-700 dark:bg-slate-800/50">
@@ -697,43 +944,109 @@ function App() {
                     No previous prescription data found yet.
                   </p>
                 ) : (
-                  <div className="mt-3 space-y-3">
-                    {previousRecords.map((record) => (
-                      <article
-                        key={record._id || record.id}
-                        className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-900/60"
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div>
-                            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                              {getPrescriptionTitle(record)}
-                            </h3>
-                            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                              {formatDateTime(record.createdAt)}
-                            </p>
-                          </div>
-                          <span className="rounded-full bg-cyan-100 px-3 py-1 text-xs font-semibold text-cyan-700 dark:bg-cyan-500/20 dark:text-cyan-200">
-                            {record.type || 'clinical_note'}
-                          </span>
+                  <div className="mt-3 space-y-5">
+                    {groupedPreviousRecords.map((group) => (
+                      <div key={group.dayLabel} className="space-y-3">
+                        <div className="flex items-center gap-3">
+                          <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
+                          <h3 className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500 dark:text-slate-300">
+                            {group.dayLabel}
+                          </h3>
+                          <span className="h-px flex-1 bg-slate-200 dark:bg-slate-700" />
                         </div>
 
-                        <div className="mt-3 grid gap-2 text-sm text-slate-700 dark:text-slate-200">
-                          <p>
-                            <span className="font-semibold">Transcription:</span>{' '}
-                            {record.transcription || 'No transcription available.'}
-                          </p>
-                          <p>
-                            <span className="font-semibold">Symptoms:</span>{' '}
-                            {Array.isArray(record.structuredData?.symptoms) && record.structuredData.symptoms.length > 0
-                              ? record.structuredData.symptoms.join(', ')
-                              : 'Not specified'}
-                          </p>
-                          <p>
-                            <span className="font-semibold">Diagnosis:</span>{' '}
-                            {record.structuredData?.diagnosis || 'Not specified'}
-                          </p>
+                        <div className="space-y-3">
+                          {group.records.map((record) => (
+                            <article
+                              key={record._id || record.id}
+                              className="overflow-hidden rounded-3xl border border-slate-200 bg-gradient-to-br from-white to-slate-50 shadow-[0_10px_30px_rgba(15,23,42,0.05)] transition hover:-translate-y-0.5 hover:shadow-[0_14px_36px_rgba(15,23,42,0.09)] dark:border-slate-700 dark:from-slate-900 dark:to-slate-800/70 dark:shadow-black/20"
+                            >
+                              <div className="border-b border-slate-200/80 px-4 py-4 dark:border-slate-700">
+                                <div className="flex flex-wrap items-start justify-between gap-3">
+                                  <div>
+                                    <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-700 dark:text-cyan-300">
+                                      {record.type === 'audio_upload' ? 'Audio Prescription' : 'Saved Clinical Note'}
+                                    </p>
+                                    <h4 className="mt-1 text-base font-semibold text-slate-900 dark:text-slate-100">
+                                      {getPrescriptionTitle(record)}
+                                    </h4>
+                                    <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                                      {formatDateTime(record.createdAt)}
+                                    </p>
+                                  </div>
+                                  <span className="rounded-full bg-cyan-100 px-3 py-1 text-xs font-semibold text-cyan-700 dark:bg-cyan-500/20 dark:text-cyan-200">
+                                    {record?.metadata?.uploadedFileName ? 'Audio File' : 'Text Note'}
+                                  </span>
+                                </div>
+                              </div>
+
+                              <div className="grid gap-3 p-4 md:grid-cols-[1.15fr_0.85fr]">
+                                <div className="space-y-3 text-sm text-slate-700 dark:text-slate-200">
+                                  <div>
+                                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                                      Transcription
+                                    </p>
+                                    <p className="mt-1 whitespace-pre-wrap leading-6">
+                                      {record.transcription || 'No transcription available.'}
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                                      Additional Notes
+                                    </p>
+                                    <p className="mt-1 leading-6 text-slate-600 dark:text-slate-300">
+                                      {record.structuredData?.additional_notes || 'No additional notes provided.'}
+                                    </p>
+                                  </div>
+                                </div>
+
+                                <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-1">
+                                  <div className="rounded-2xl bg-slate-100/80 p-3 dark:bg-slate-900/70">
+                                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                                      Symptoms
+                                    </p>
+                                    <p className="mt-2 text-sm font-medium text-slate-800 dark:text-slate-100">
+                                      {Array.isArray(record.structuredData?.symptoms) && record.structuredData.symptoms.length > 0
+                                        ? record.structuredData.symptoms.join(', ')
+                                        : 'Not specified'}
+                                    </p>
+                                  </div>
+
+                                  <div className="rounded-2xl bg-slate-100/80 p-3 dark:bg-slate-900/70">
+                                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                                      Diagnosis
+                                    </p>
+                                    <p className="mt-2 text-sm font-medium text-slate-800 dark:text-slate-100">
+                                      {record.structuredData?.diagnosis || 'Not specified'}
+                                    </p>
+                                  </div>
+
+                                  <div className="rounded-2xl bg-slate-100/80 p-3 dark:bg-slate-900/70">
+                                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                                      Medications
+                                    </p>
+                                    <p className="mt-2 text-sm font-medium text-slate-800 dark:text-slate-100">
+                                      {Array.isArray(record.structuredData?.medications) && record.structuredData.medications.length > 0
+                                        ? record.structuredData.medications.join(', ')
+                                        : 'Not specified'}
+                                    </p>
+                                  </div>
+
+                                  <div className="rounded-2xl bg-slate-100/80 p-3 dark:bg-slate-900/70">
+                                    <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                                      Severity
+                                    </p>
+                                    <p className="mt-2 text-sm font-medium text-slate-800 dark:text-slate-100">
+                                      {record.structuredData?.severity || 'Not specified'}
+                                    </p>
+                                  </div>
+                                </div>
+                              </div>
+                            </article>
+                          ))}
                         </div>
-                      </article>
+                      </div>
                     ))}
                   </div>
                 )}

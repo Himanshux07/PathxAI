@@ -19,10 +19,12 @@ export const uploadClinicalAudio = asyncHandler(async (req, res) => {
   await saveClinicalRecord({
     patientId: req.user.patientId,
     type: 'audio_upload',
-    fileName: result.fileName,
-    fileSize: result.fileSize,
     transcription: result.transcription,
     structuredData: result.structuredData,
+    metadata: {
+      uploadedFileName: result.fileName,
+      fileSize: Number(req.file.size || 0),
+    },
   })
 
   return res.json(result)
@@ -30,14 +32,33 @@ export const uploadClinicalAudio = asyncHandler(async (req, res) => {
 
 export const saveClinicalData = asyncHandler(async (req, res) => {
   const { transcription = '', structuredData = emptyStructuredData } = req.body || {}
+
+  let parsedStructuredData = structuredData
+  if (typeof structuredData === 'string') {
+    try {
+      parsedStructuredData = JSON.parse(structuredData)
+    } catch {
+      const error = new Error('Invalid structured JSON. Please provide valid JSON data.')
+      error.statusCode = 400
+      throw error
+    }
+  }
+
+  if (!parsedStructuredData || typeof parsedStructuredData !== 'object' || Array.isArray(parsedStructuredData)) {
+    const error = new Error('Invalid structured JSON object.')
+    error.statusCode = 400
+    throw error
+  }
+
   const normalizedStructuredData =
-    structuredData && Object.values(structuredData).some((value) => (Array.isArray(value) ? value.length > 0 : value !== ''))
-      ? structuredData
+    parsedStructuredData &&
+    Object.values(parsedStructuredData).some((value) => (Array.isArray(value) ? value.length > 0 : value !== ''))
+      ? parsedStructuredData
       : extractStructuredDataFromTranscription(transcription)
 
   const savedRecord = await saveClinicalRecord({
     patientId: req.user.patientId,
-    type: 'clinical_note',
+    type: 'text_note',
     transcription,
     structuredData: normalizedStructuredData,
   })
