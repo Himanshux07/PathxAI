@@ -74,11 +74,39 @@ const diagnosisKeywords = [
 ]
 
 const languageHints = [
-  { language: 'Hindi', patterns: [' aap ', ' mujhe ', ' dard ', ' bukhar ', ' khansi ', ' pet ', ' se ', ' nahi ', ' hai '], script: /[\u0900-\u097F]/ },
-  { language: 'Marathi', patterns: [' mala ', ' aahe ', ' zala ', ' jhala ', ' kay ', ' hota ', ' dukhat ', ' tond '], script: /[\u0900-\u097F]/ },
+  { language: 'Hindi', patterns: [' aap ', ' mujhe ', ' dard ', ' bukhar ', ' khansi ', ' nahi ', ' hai '], script: /[\u0900-\u097F]/ },
+  { language: 'Marathi', patterns: [' mala ', ' aahe ', ' zala ', ' jhala ', ' kay ', ' hota ', ' dukhat '], script: /[\u0900-\u097F]/ },
+  { language: 'Urdu', patterns: [' janab ', ' bukhar hai ', ' dard hai '], script: /[\u0600-\u06FF]/ },
+  { language: 'Bengali', patterns: [' amar ', ' jor ', ' betha '], script: /[\u0980-\u09FF]/ },
+  { language: 'Punjabi', patterns: [' menu ', ' dard ', ' bukhar '], script: /[\u0A00-\u0A7F]/ },
+  { language: 'Gujarati', patterns: [' mane ', ' dukhavo ', ' taav '], script: /[\u0A80-\u0AFF]/ },
+  { language: 'Tamil', patterns: [' enakku ', ' vali ', ' kaaychal '], script: /[\u0B80-\u0BFF]/ },
+  { language: 'Telugu', patterns: [' naaku ', ' noppi ', ' jvaram '], script: /[\u0C00-\u0C7F]/ },
+  { language: 'Kannada', patterns: [' nanage ', ' novu ', ' jvara '], script: /[\u0C80-\u0CFF]/ },
+  { language: 'Malayalam', patterns: [' enikku ', ' vedana ', ' pani '], script: /[\u0D00-\u0D7F]/ },
 ]
 
 const normalizeText = (value = '') => value.toLowerCase().replace(/\s+/g, ' ').trim()
+
+const extractJsonCandidate = (value = '') => {
+  const text = typeof value === 'string' ? value.trim() : ''
+  if (!text) {
+    return ''
+  }
+
+  const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fencedMatch?.[1]) {
+    return fencedMatch[1].trim()
+  }
+
+  const firstCurly = text.indexOf('{')
+  const lastCurly = text.lastIndexOf('}')
+  if (firstCurly >= 0 && lastCurly > firstCurly) {
+    return text.slice(firstCurly, lastCurly + 1).trim()
+  }
+
+  return text
+}
 
 const formatList = (items) => {
   if (!items.length) {
@@ -102,7 +130,7 @@ const normalizeStructuredData = (value) => {
   }
 }
 
-const detectLanguage = (transcription) => {
+const detectLanguageHeuristic = (transcription) => {
   const normalizedText = normalizeText(transcription)
 
   for (const hint of languageHints) {
@@ -120,6 +148,87 @@ const detectLanguage = (transcription) => {
   }
 
   return 'Unknown'
+}
+
+const detectLanguageWithAI = async (transcription) => {
+  const text = typeof transcription === 'string' ? transcription.trim() : ''
+  if (!text) {
+    return ''
+  }
+
+  const aiProvider = normalizeText(process.env.AI_PROVIDER || 'gemini')
+
+  if (aiProvider === 'gemini') {
+    const geminiApiKey = process.env.AI_API_KEY || process.env.GEMINI_API_KEY || process.env.TRANSCRIPTION_API_KEY
+    if (!geminiApiKey) {
+      return ''
+    }
+
+    const model = process.env.GEMINI_STRUCTURED_DATA_MODEL || process.env.STRUCTURED_DATA_MODEL || 'gemini-1.5-flash'
+    const responseText = await callGeminiGenerateContent({
+      apiKey: geminiApiKey,
+      model,
+      parts: [
+        {
+          text:
+            'Detect the primary spoken language from this medical transcript. Return JSON only: {"language_detected":"<language name>"}.',
+        },
+        { text },
+      ],
+    }).catch(() => '')
+
+    try {
+      const parsed = JSON.parse(extractJsonCandidate(responseText))
+      return typeof parsed?.language_detected === 'string' ? parsed.language_detected.trim() : ''
+    } catch {
+      return ''
+    }
+  }
+
+  const aiApiKey = process.env.AI_API_KEY || process.env.TRANSCRIPTION_API_KEY
+  if (!aiApiKey) {
+    return ''
+  }
+
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${aiApiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: process.env.STRUCTURED_DATA_MODEL || 'gpt-4o-mini',
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: 'Detect the primary spoken language from transcript. Return only JSON: {"language_detected":"<language name>"}.',
+        },
+        {
+          role: 'user',
+          content: text,
+        },
+      ],
+    }),
+  }).catch(() => null)
+
+  if (!response?.ok) {
+    return ''
+  }
+
+  const payload = await response.json().catch(() => null)
+  const content = payload?.choices?.[0]?.message?.content
+  if (!content || typeof content !== 'string') {
+    return ''
+  }
+
+  try {
+    const parsed = JSON.parse(extractJsonCandidate(content))
+    return typeof parsed?.language_detected === 'string' ? parsed.language_detected.trim() : ''
+  } catch {
+    return ''
+  }
 }
 
 const extractDuration = (transcription) => {
@@ -170,7 +279,7 @@ export const extractStructuredDataFromTranscription = (transcription) => {
   const duration = extractDuration(text)
   const severity = extractSeverity(text)
   const diagnosis = extractDiagnosis(text)
-  const languageDetected = detectLanguage(text)
+  const languageDetected = detectLanguageHeuristic(text)
 
   const missingInformation = []
 
@@ -228,10 +337,115 @@ const transcribeWithOpenAI = async (file) => {
   return payload.text || ''
 }
 
+const callGeminiGenerateContent = async ({ apiKey, model, parts }) => {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        generationConfig: {
+          temperature: 0,
+        },
+        contents: [
+          {
+            role: 'user',
+            parts,
+          },
+        ],
+      }),
+    },
+  )
+
+  if (!response.ok) {
+    const errorPayload = await response.text().catch(() => '')
+    throw new Error(`Gemini provider error: ${response.status} ${errorPayload}`)
+  }
+
+  const payload = await response.json()
+  const modelText = (payload?.candidates || [])
+    .flatMap((candidate) => candidate?.content?.parts || [])
+    .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+    .join('\n')
+    .trim()
+
+  return modelText
+}
+
+const transcribeWithGemini = async (file) => {
+  if (!file?.buffer?.length) {
+    throw new Error('Audio file buffer is empty.')
+  }
+
+  const geminiApiKey = process.env.GEMINI_API_KEY || process.env.TRANSCRIPTION_API_KEY
+  if (!geminiApiKey) {
+    throw new Error('GEMINI_API_KEY is not configured.')
+  }
+
+  const model = process.env.GEMINI_TRANSCRIPTION_MODEL || process.env.TRANSCRIPTION_MODEL || 'gemini-1.5-flash'
+  const prompt =
+    process.env.TRANSCRIPTION_PROMPT ||
+    'Transcribe this medical consultation audio. Preserve Hindi/Hinglish wording accurately and keep speaker labels as Patient: and Doctor: where possible. Return plain transcript text only.'
+
+  const transcript = await callGeminiGenerateContent({
+    apiKey: geminiApiKey,
+    model,
+    parts: [
+      { text: prompt },
+      {
+        inline_data: {
+          mime_type: file.mimetype || 'audio/webm',
+          data: file.buffer.toString('base64'),
+        },
+      },
+    ],
+  })
+
+  return transcript || ''
+}
+
 const extractStructuredDataWithAI = async (transcription) => {
   const text = typeof transcription === 'string' ? transcription.trim() : ''
+  const aiProvider = normalizeText(process.env.AI_PROVIDER || 'gemini')
+  if (!text) {
+    return null
+  }
+
+  if (aiProvider === 'gemini') {
+    const geminiApiKey = process.env.AI_API_KEY || process.env.GEMINI_API_KEY || process.env.TRANSCRIPTION_API_KEY
+    if (!geminiApiKey) {
+      return null
+    }
+
+    const model = process.env.GEMINI_STRUCTURED_DATA_MODEL || process.env.STRUCTURED_DATA_MODEL || 'gemini-1.5-flash'
+    const content = await callGeminiGenerateContent({
+      apiKey: geminiApiKey,
+      model,
+      parts: [
+        {
+          text:
+            'Convert this doctor-patient consultation into valid JSON only with keys: language_detected, symptoms, duration, severity, diagnosis, medications, additional_notes, missing_information. symptoms, medications, missing_information must be arrays.',
+        },
+        {
+          text,
+        },
+      ],
+    }).catch(() => '')
+
+    const candidate = extractJsonCandidate(content)
+
+    try {
+      const parsed = JSON.parse(candidate)
+      return normalizeStructuredData(parsed)
+    } catch {
+      return null
+    }
+  }
+
   const aiApiKey = process.env.AI_API_KEY || process.env.TRANSCRIPTION_API_KEY
-  if (!text || !aiApiKey) {
+  if (!aiApiKey) {
     return null
   }
 
@@ -270,22 +484,30 @@ const extractStructuredDataWithAI = async (transcription) => {
   }
 
   try {
-    const parsed = JSON.parse(content)
+    const parsed = JSON.parse(extractJsonCandidate(content))
     return normalizeStructuredData(parsed)
   } catch {
     return null
   }
 }
 
-const getTranscriptionText = async ({ file, patientId }) => {
-  const provider = normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'openai')
+const getTranscriptionText = async ({ file }) => {
+  const provider = normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'gemini')
 
-  if (provider !== 'mock' && process.env.TRANSCRIPTION_API_KEY) {
+  if (provider === 'gemini') {
+    const geminiApiKey = process.env.GEMINI_API_KEY || process.env.TRANSCRIPTION_API_KEY
+    if (geminiApiKey) {
+      return transcribeWithGemini(file)
+    }
+  }
+
+  if (provider === 'openai' && process.env.TRANSCRIPTION_API_KEY) {
     return transcribeWithOpenAI(file)
   }
 
-  const fileName = file?.originalname || 'uploaded-audio'
-  return `Audio file ${fileName} received for patient ${patientId}. Configure TRANSCRIPTION_PROVIDER=OpenAI and TRANSCRIPTION_API_KEY to transcribe audio.`
+  const error = new Error('Transcription provider is not configured. Set GEMINI_API_KEY (recommended) and TRANSCRIPTION_PROVIDER=gemini.')
+  error.statusCode = 503
+  throw error
 }
 
 const formatFileSize = (bytes) => {
@@ -310,14 +532,19 @@ export const processClinicalUpload = async ({ file, patientId }) => {
   const fileName = file?.originalname || 'uploaded-audio'
   const fileSize = formatFileSize(file?.size || 0)
   const audioStorage = await uploadAudioBufferToCloudinary({ file, patientId }).catch(() => null)
-  const transcription = await getTranscriptionText({ file, patientId })
+  const transcription = await getTranscriptionText({ file })
   const aiStructuredData = await extractStructuredDataWithAI(transcription).catch(() => null)
   const ruleBasedStructuredData = extractStructuredDataFromTranscription(transcription)
-  const structuredData = normalizeStructuredData(aiStructuredData || ruleBasedStructuredData)
+  const aiLanguage = await detectLanguageWithAI(transcription).catch(() => '')
+  const structuredData = normalizeStructuredData({
+    ...(aiStructuredData || ruleBasedStructuredData),
+    language_detected: aiLanguage || aiStructuredData?.language_detected || ruleBasedStructuredData.language_detected || 'Unknown',
+  })
   const durationMs = Date.now() - startedAt
 
-  const transcriptionProvider = process.env.TRANSCRIPTION_API_KEY ? normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'openai') : 'none'
-  const aiProvider = aiStructuredData ? normalizeText(process.env.AI_PROVIDER || 'openai') : 'rule_based'
+  const hasAnyTranscriptionKey = !!(process.env.GEMINI_API_KEY || process.env.TRANSCRIPTION_API_KEY)
+  const transcriptionProvider = hasAnyTranscriptionKey ? normalizeText(process.env.TRANSCRIPTION_PROVIDER || 'gemini') : 'none'
+  const aiProvider = aiStructuredData ? normalizeText(process.env.AI_PROVIDER || 'gemini') : 'rule_based'
 
   return {
     transcription,

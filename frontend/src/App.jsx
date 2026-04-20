@@ -119,6 +119,8 @@ function App() {
   const [saveStatus, setSaveStatus] = useState('Not saved')
   const [errorMessage, setErrorMessage] = useState('')
   const [recordingSeconds, setRecordingSeconds] = useState(0)
+  const [audioLevels, setAudioLevels] = useState(() => Array.from({ length: 24 }, () => 0.08))
+  const [recordingQualityHint, setRecordingQualityHint] = useState('')
   const [uploadedFileName, setUploadedFileName] = useState('')
   const [previousRecords, setPreviousRecords] = useState([])
   const [isLoadingRecords, setIsLoadingRecords] = useState(false)
@@ -128,6 +130,10 @@ function App() {
   const chunksRef = useRef([])
   const timerRef = useRef(null)
   const fileInputRef = useRef(null)
+  const audioContextRef = useRef(null)
+  const analyserRef = useRef(null)
+  const audioSourceRef = useRef(null)
+  const monitorFrameRef = useRef(null)
 
   useEffect(() => {
     const root = document.documentElement
@@ -185,6 +191,88 @@ function App() {
     loadPreviousRecords()
   }, [authToken, currentUser])
 
+  const stopAudioMonitor = () => {
+    if (monitorFrameRef.current) {
+      window.cancelAnimationFrame(monitorFrameRef.current)
+      monitorFrameRef.current = null
+    }
+
+    if (audioSourceRef.current) {
+      audioSourceRef.current.disconnect()
+      audioSourceRef.current = null
+    }
+
+    if (analyserRef.current) {
+      analyserRef.current.disconnect()
+      analyserRef.current = null
+    }
+
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {})
+      audioContextRef.current = null
+    }
+
+    setAudioLevels(Array.from({ length: 24 }, () => 0.08))
+    setRecordingQualityHint('')
+  }
+
+  const startAudioMonitor = async (stream) => {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext
+    if (!AudioContextClass) {
+      return
+    }
+
+    stopAudioMonitor()
+
+    const context = new AudioContextClass()
+    const source = context.createMediaStreamSource(stream)
+    const analyser = context.createAnalyser()
+    analyser.fftSize = 256
+    analyser.smoothingTimeConstant = 0.82
+    source.connect(analyser)
+
+    audioContextRef.current = context
+    audioSourceRef.current = source
+    analyserRef.current = analyser
+
+    const frequencyData = new Uint8Array(analyser.frequencyBinCount)
+
+    const tick = () => {
+      if (!analyserRef.current) {
+        return
+      }
+
+      analyserRef.current.getByteFrequencyData(frequencyData)
+
+      const bars = 24
+      const chunkSize = Math.max(1, Math.floor(frequencyData.length / bars))
+      const nextLevels = Array.from({ length: bars }, (_, barIndex) => {
+        const start = barIndex * chunkSize
+        const end = Math.min(frequencyData.length, start + chunkSize)
+        let total = 0
+        for (let index = start; index < end; index += 1) {
+          total += frequencyData[index]
+        }
+        const average = (end > start ? total / (end - start) : 0) / 255
+        return Math.max(0.08, Math.min(1, average))
+      })
+
+      const averageLevel = nextLevels.reduce((sum, value) => sum + value, 0) / nextLevels.length
+      if (averageLevel < 0.12) {
+        setRecordingQualityHint('Voice level is low. Move closer to the mic.')
+      } else if (averageLevel > 0.75) {
+        setRecordingQualityHint('Audio level is very high. Reduce background noise if possible.')
+      } else {
+        setRecordingQualityHint('Recording quality looks good.')
+      }
+
+      setAudioLevels(nextLevels)
+      monitorFrameRef.current = window.requestAnimationFrame(tick)
+    }
+
+    monitorFrameRef.current = window.requestAnimationFrame(tick)
+  }
+
   useEffect(() => {
     return () => {
       if (mediaRecorderRef.current?.state === 'recording') {
@@ -196,6 +284,7 @@ function App() {
       }
 
       mediaStreamRef.current?.getTracks().forEach((track) => track.stop())
+      stopAudioMonitor()
     }
   }, [])
 
@@ -217,6 +306,8 @@ function App() {
     setErrorMessage('')
     setAuthError('')
     setRecordingSeconds(0)
+    setAudioLevels(Array.from({ length: 24 }, () => 0.08))
+    setRecordingQualityHint('')
     setUploadedFileName('')
     setPreviousRecords([])
 
@@ -231,6 +322,7 @@ function App() {
 
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop())
     mediaStreamRef.current = null
+    stopAudioMonitor()
   }
 
   const apiFetch = async (path, options = {}) => {
@@ -377,10 +469,18 @@ function App() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          noiseSuppression: true,
+          echoCancellation: true,
+          autoGainControl: true,
+          channelCount: 1,
+        },
+      })
       const recorder = new MediaRecorder(stream)
       chunksRef.current = []
       setRecordingSeconds(0)
+      startAudioMonitor(stream).catch(() => {})
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
@@ -395,6 +495,7 @@ function App() {
 
         stream.getTracks().forEach((track) => track.stop())
         mediaStreamRef.current = null
+        stopAudioMonitor()
       }
 
       mediaRecorderRef.current = recorder
@@ -410,6 +511,7 @@ function App() {
     } catch (error) {
       setErrorMessage('Unable to access microphone. Please allow permissions.')
       setAudioStatus(initialAudioStatus)
+      stopAudioMonitor()
     }
   }
 
@@ -425,6 +527,7 @@ function App() {
       timerRef.current = null
     }
 
+    setAudioStatus('Recording stopped. Preparing upload...')
     mediaRecorderRef.current.stop()
   }
 
@@ -816,22 +919,42 @@ function App() {
 
           <main className="grid gap-6 p-5 md:p-8 lg:grid-cols-[0.95fr_1.05fr]">
             <section className="space-y-4 rounded-[1.6rem] border border-slate-200 bg-slate-50/80 p-4 shadow-sm dark:border-slate-700 dark:bg-slate-800/50 md:p-5">
-              <div className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 dark:border-slate-700 dark:bg-slate-900/80">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
-                    Recording mode
-                  </p>
-                  <p className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">{recordingLabel}</p>
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900/80">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-slate-500 dark:text-slate-400">
+                      Real-time voice capture
+                    </p>
+                    <p className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">{recordingLabel}</p>
+                  </div>
+                  <span
+                    className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                      isRecording
+                        ? 'bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-200'
+                        : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-200'
+                    }`}
+                  >
+                    {isRecording ? 'Live' : 'Standby'}
+                  </span>
                 </div>
-                <span
-                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                    isRecording
-                      ? 'bg-rose-100 text-rose-700 dark:bg-rose-500/20 dark:text-rose-200'
-                      : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-200'
-                  }`}
-                >
-                  {isRecording ? 'Recording' : 'Ready'}
-                </span>
+
+                <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800/70">
+                  <div className="flex h-20 items-end gap-1">
+                    {audioLevels.map((level, index) => (
+                      <span
+                        key={`audio-level-${index}`}
+                        className={`w-full rounded-sm transition-all duration-100 ${
+                          isRecording ? 'bg-gradient-to-t from-rose-500 to-amber-300' : 'bg-gradient-to-t from-cyan-500 to-emerald-300'
+                        }`}
+                        style={{ height: `${Math.max(10, Math.round(level * 72))}px` }}
+                      />
+                    ))}
+                  </div>
+                </div>
+
+                <p className="mt-3 text-xs font-medium text-slate-600 dark:text-slate-300">
+                  {recordingQualityHint || 'Press Start Recording to begin live capture.'}
+                </p>
               </div>
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -841,7 +964,7 @@ function App() {
                   disabled={isRecording || isProcessing}
                   className="rounded-2xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-slate-950/20 transition hover:-translate-y-0.5 hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400 dark:bg-cyan-500 dark:text-slate-950 dark:hover:bg-cyan-400"
                 >
-                  Start Recording
+                  Start Live Recording
                 </button>
                 <button
                   type="button"
@@ -849,7 +972,7 @@ function App() {
                   disabled={!isRecording}
                   className="rounded-2xl bg-rose-600 px-4 py-3 text-sm font-semibold text-white transition hover:-translate-y-0.5 hover:bg-rose-700 disabled:cursor-not-allowed disabled:bg-rose-300 dark:disabled:bg-rose-800"
                 >
-                  Stop Recording
+                  Stop and Process
                 </button>
               </div>
 

@@ -69,7 +69,6 @@ const clinicalRecordSchema = new mongoose.Schema(
     structuredData: {
       language_detected: {
         type: String,
-        enum: ['English', 'Hindi', 'Marathi', 'Unknown'],
         default: 'Unknown',
       },
       symptoms: [
