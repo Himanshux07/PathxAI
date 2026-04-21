@@ -25,9 +25,34 @@ Server runs at `http://localhost:4000`
 
 ### Clinical Data
 - `POST /api/clinical/upload` - Upload audio file (multipart/form-data)
+- `POST /api/clinical/process` - Unified flow for prerecorded audio OR realtime transcript
 - `POST /api/clinical/save` - Save transcription and structured data
 - `GET /api/clinical/records` - Get patient's clinical records
 - `GET /api/health` - Health check
+
+#### `POST /api/clinical/process` usage
+
+Authentication required with `Authorization: Bearer <jwt>`.
+
+1) Prerecorded audio flow (`multipart/form-data`):
+- `audio`: audio file
+- `sourceType`: `audio_upload` or `audio_record`
+- `patientId` (optional): only for `doctor`/`admin` users
+- `autoSave` (optional, default `true`)
+
+2) Realtime speech-to-text flow (`application/json`):
+```json
+{
+  "sourceType": "audio_record",
+  "realtimeTranscription": "Patient: I have fever and headache for two days...",
+  "transcriptionProvider": "browser_web_speech",
+  "groqApiKey": "optional-groq-key-from-ui",
+  "autoSave": true,
+  "patientId": "PATIENT001"
+}
+```
+
+When `autoSave=true`, the backend automatically stores the record in MongoDB after JSON extraction.
 
 ## Authentication Model
 
@@ -56,25 +81,31 @@ JWT_EXPIRY=8h
 # CORS
 FRONTEND_ORIGIN=http://localhost:5173
 
-# Database (currently file-based)
-DB_TYPE=file
-DB_PATH=./data/state.json
+# Database
+DATABASE_URL=mongodb://localhost:27017/pathxai
 
 # Demo Credentials
 DEMO_PATIENT_ID=PATIENT001
 DEMO_PASSWORD=123456
 
-# Logging
-LOG_LEVEL=info
+# Voice -> Text (OpenAI Whisper)
+TRANSCRIPTION_API_KEY=your-openai-api-key
+TRANSCRIPTION_MODEL=whisper-1
+TRANSCRIPTION_LANGUAGE=auto
 
-# Transcription (placeholder for future integration)
-# TRANSCRIPTION_API_KEY=your-api-key
-# TRANSCRIPTION_SERVICE=google
+# Text -> JSON (Groq)
+GROQ_API_KEY=your-groq-api-key
+GROQ_STRUCTURED_DATA_MODEL=mixtral-8x7b-32768
+
+# Optional Cloudinary audio storage
+CLOUDINARY_CLOUD_NAME=your-cloud-name
+CLOUDINARY_API_KEY=your-cloudinary-api-key
+CLOUDINARY_API_SECRET=your-cloudinary-api-secret
 ```
 
 ## Database Integration
 
-Currently uses file-based persistence (`backend/data/state.json`).
+Uses MongoDB (Mongoose) for user and clinical record persistence.
 
 To integrate your own database:
 

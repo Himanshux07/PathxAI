@@ -117,6 +117,20 @@ const clinicalRecordSchema = new mongoose.Schema(
         type: Number,
         default: 0,
       },
+      initiatedBy: {
+        type: String,
+        default: '',
+      },
+      initiatedByRole: {
+        type: String,
+        enum: ['patient', 'doctor', 'admin', ''],
+        default: '',
+      },
+      sourceType: {
+        type: String,
+        enum: ['audio_upload', 'audio_record', 'text_note', ''],
+        default: '',
+      },
     },
     createdAt: {
       type: Date,

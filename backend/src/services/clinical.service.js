@@ -131,6 +131,19 @@ const normalizeStructuredData = (value) => {
   }
 }
 
+const normalizeSourceType = (sourceType) => {
+  const normalized = typeof sourceType === 'string' ? sourceType.trim() : ''
+  if (!normalized) {
+    return 'audio_upload'
+  }
+
+  if (['audio_upload', 'audio_record', 'text_note'].includes(normalized)) {
+    return normalized
+  }
+
+  return 'audio_upload'
+}
+
 const detectLanguageHeuristic = (transcription) => {
   const normalizedText = normalizeText(transcription)
 
@@ -151,13 +164,13 @@ const detectLanguageHeuristic = (transcription) => {
   return 'Unknown'
 }
 
-const detectLanguageWithAI = async (transcription) => {
+const detectLanguageWithAI = async (transcription, options = {}) => {
   const text = typeof transcription === 'string' ? transcription.trim() : ''
   if (!text) {
     return ''
   }
 
-  const groqApiKey = process.env.AI_API_KEY || process.env.GROQ_API_KEY || process.env.TRANSCRIPTION_API_KEY
+  const groqApiKey = options.groqApiKey || process.env.AI_API_KEY || process.env.GROQ_API_KEY || process.env.TRANSCRIPTION_API_KEY
   if (!groqApiKey) {
     return ''
   }
@@ -310,13 +323,13 @@ const callGroqGenerateContent = async ({ apiKey, model, messages }) => {
 
 
 
-const extractStructuredDataWithAI = async (transcription) => {
+const extractStructuredDataWithAI = async (transcription, options = {}) => {
   const text = typeof transcription === 'string' ? transcription.trim() : ''
   if (!text) {
     return null
   }
 
-  const groqApiKey = process.env.AI_API_KEY || process.env.GROQ_API_KEY || process.env.TRANSCRIPTION_API_KEY
+  const groqApiKey = options.groqApiKey || process.env.AI_API_KEY || process.env.GROQ_API_KEY || process.env.TRANSCRIPTION_API_KEY
   if (!groqApiKey) {
     return null
   }
@@ -349,6 +362,12 @@ const extractStructuredDataWithAI = async (transcription) => {
 }
 
 const getTranscriptionText = async ({ file }) => {
+  if (!file) {
+    const error = new Error('Audio file is required for transcription.')
+    error.statusCode = 400
+    throw error
+  }
+
   // Speech-to-text transcription uses OpenAI Whisper
   if (process.env.TRANSCRIPTION_API_KEY) {
     return transcribeWithOpenAI(file)
@@ -377,14 +396,32 @@ const formatFileSize = (bytes) => {
 }
 
 export const processClinicalUpload = async ({ file, patientId }) => {
+  return processClinicalSession({
+    file,
+    patientId,
+    sourceType: 'audio_upload',
+  })
+}
+
+export const processClinicalSession = async ({
+  file,
+  patientId,
+  sourceType = 'audio_upload',
+  realtimeTranscription = '',
+  transcriptionProvider = 'realtime_stt_agent',
+  groqApiKey = '',
+}) => {
   const startedAt = Date.now()
+  const normalizedSourceType = normalizeSourceType(sourceType)
+  const realtimeText = typeof realtimeTranscription === 'string' ? realtimeTranscription.trim() : ''
+  const useRealtimeText = Boolean(realtimeText)
   const fileName = file?.originalname || 'uploaded-audio'
   const fileSize = formatFileSize(file?.size || 0)
-  const audioStorage = await uploadAudioBufferToCloudinary({ file, patientId }).catch(() => null)
-  const transcription = await getTranscriptionText({ file })
-  const aiStructuredData = await extractStructuredDataWithAI(transcription).catch(() => null)
+  const audioStorage = useRealtimeText ? null : await uploadAudioBufferToCloudinary({ file, patientId }).catch(() => null)
+  const transcription = useRealtimeText ? realtimeText : await getTranscriptionText({ file })
+  const aiStructuredData = await extractStructuredDataWithAI(transcription, { groqApiKey }).catch(() => null)
   const ruleBasedStructuredData = extractStructuredDataFromTranscription(transcription)
-  const aiLanguage = await detectLanguageWithAI(transcription).catch(() => '')
+  const aiLanguage = await detectLanguageWithAI(transcription, { groqApiKey }).catch(() => '')
   const structuredData = normalizeStructuredData({
     ...(aiStructuredData || ruleBasedStructuredData),
     language_detected: aiLanguage || aiStructuredData?.language_detected || ruleBasedStructuredData.language_detected || 'Unknown',
@@ -392,30 +429,37 @@ export const processClinicalUpload = async ({ file, patientId }) => {
   const durationMs = Date.now() - startedAt
 
   const hasTranscriptionKey = !!process.env.TRANSCRIPTION_API_KEY
-  const transcriptionProvider = hasTranscriptionKey ? 'openai_whisper' : 'none'
+  const finalTranscriptionProvider = useRealtimeText
+    ? transcriptionProvider || 'realtime_stt_agent'
+    : hasTranscriptionKey
+      ? 'openai_whisper'
+      : 'none'
   const aiProvider = aiStructuredData ? 'groq' : 'rule_based'
 
   return {
     transcription,
     structuredData: {
       ...structuredData,
-      additional_notes: `${structuredData.additional_notes}\nUploaded file ${fileName} (${fileSize}).`,
+      additional_notes: useRealtimeText
+        ? structuredData.additional_notes
+        : `${structuredData.additional_notes}\nUploaded file ${fileName} (${fileSize}).`,
     },
     audio: {
       storageProvider: audioStorage?.storageProvider || 'none',
       url: audioStorage?.url || '',
       publicId: audioStorage?.publicId || '',
-      originalFileName: fileName,
-      mimeType: file?.mimetype || 'audio/webm',
+      originalFileName: useRealtimeText ? '' : fileName,
+      mimeType: file?.mimetype || (useRealtimeText ? '' : 'audio/webm'),
       sizeBytes: Number(file?.size || 0),
     },
     processing: {
       status: 'structured',
-      transcriptionProvider,
+      transcriptionProvider: finalTranscriptionProvider,
       aiProvider,
       durationMs,
       errorMessage: '',
     },
+    sourceType: normalizedSourceType,
     fileName,
     fileSize,
     message: 'Voice -> Text -> AI -> JSON completed and ready for database save.',
